@@ -191,40 +191,54 @@ def mask(Z, X_inp, X_tgt, M_c, M_f, filter_len):
     return Z_t, X_inp_t, X_tgt_t
 
 
-def detect_deflect(X, trial_num=0):
+def detect_deflect(Z: dict, msca: object, trial_num=0) -> np.ndarray:
     """
     Sorts signals by peak deflection time
 
-    Arguments
+    Parameters
     ----------
-    X : dict
-        Keys are region names, values are lists of trials
-        where each trial is a T x K np.array(). Each trial
-        should have K cols, where K is the number of latents.
+    Z : dict[str, list[np.ndarray]]
+        Keys are region names, values are lists of trials where each trial
+        is a np.ndarray of shape truncated(t_j) x n_components
+    msca : object
+        Trained mSCA object
+    trial_num : int
+        The trial number to order in terms of latent deflection time
 
     Returns
-    ----------
-    idxs : np.array
-        Inputs sorted by time of peak deflection from the
-        mean.
+    -------
+    idxs : np.ndarray
+        Indices ordering the latents by deflection time.
     """
-    # Sum the latents across brain regions
-    x_c = sum([v[trial_num] for _, v in X.items()])
+    # Grab the latent for the current trial
+    Z = {k: v[trial_num] for k, v in Z.items()}
 
-    # Grab the number of latent dimensions
-    K = x_c.shape[-1]  # type:ignore
+    # Amount of squared activity each dimension explains in SCA
+    sq_activity = {}
+    for k, v in Z.items():
+        sq_activity[k] = [
+            np.sum(
+                (
+                    v[:, i : i + 1]
+                    @ np.array(msca.model.decoder.model.weight.data)[:, i : i + 1].T  # type: ignore
+                )
+                ** 2,
+                axis=1,
+            )
+            for i in range(msca.n_components)  # type: ignore
+        ]
 
-    # Compute the deviations of summed latents from mean
-    devs = (x_c - x_c.mean(axis=0)) ** 2  # type:ignore
+    # Sum squared activity across regions
+    summed_sq_activity = sum([np.array(v) for v in sq_activity.values()])
 
-    # Find where deviations from mean start
-    idxs = [
-        np.where((devs > x_c.std(axis=0))[:, i])[0][0] for i in range(K)  # type:ignore
-    ]
+    # Get the deflection times
+    deflection_times = np.argmax(
+        np.abs(summed_sq_activity - summed_sq_activity.mean(axis=1)[:, None])  # type: ignore
+        > summed_sq_activity.std(axis=1)[:, None],  # type: ignore
+        axis=1,
+    )
 
-    # Sort the dimensions according to their first deflections
-    idxs = np.array(idxs).argsort()
-    return idxs
+    return np.argsort(deflection_times)
 
 
 def to_list_of_dicts(X):

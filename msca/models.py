@@ -297,7 +297,7 @@ class mSCA:
         self, X: dict[str, list[np.ndarray]], mode: str = "evaluate"
     ) -> dict[str, list[np.ndarray]]:
         # Convert inputs to data loader maintaining trial ordering
-        data_loader, trial_lengths = _convert_to_dataloader(
+        data_loader, trial_lengths = convert_to_dataloader(
             X, batch_size=1, shuffle=False
         )
 
@@ -328,7 +328,7 @@ class mSCA:
         self, X: dict[str, list[np.ndarray]], mode: str = "evaluate"
     ) -> dict[str, list[np.ndarray]]:
         # Convert inputs to data loader
-        data_loader, trial_lengths = _convert_to_dataloader(X, batch_size=1)
+        data_loader, trial_lengths = convert_to_dataloader(X, batch_size=1)
 
         # IMPORTANT: Disable coordinated dropout for finding latents
         self.cd.cd_rate = 0.0

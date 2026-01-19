@@ -95,6 +95,7 @@ def simulate_trial_averages(
 
     # Time-shift latents
     Z0, Z1 = np.zeros_like(Z), np.zeros_like(Z)
+    f0s, f1s = [], []
     for dim, delay in enumerate(delays):
         f0 = _create_filter(delay, max_shift=max_shift)
         f1 = _create_filter(-delay, max_shift=max_shift)
@@ -104,6 +105,11 @@ def simulate_trial_averages(
 
         Z0[:, dim] = np.convolve(Z[:, dim], f0, mode="same")
         Z1[:, dim] = np.convolve(Z[:, dim], f1, mode="same")
+
+        f0s.append(f0), f1s.append(f1)  # type: ignore
+
+    # Compute the ground-truth delays for comparison to trained model
+    delays_gt = [(f0_i.argmax() - f1_i.argmax()).item() for f0_i, f1_i in zip(f0s, f1s)]
 
     # Make region-specific dimensions
     Z0_final = Z0.copy()
@@ -138,9 +144,7 @@ def simulate_trial_averages(
     Z_gt["Z0"] = Z0_final
     Z_gt["Z1"] = Z1_final
 
-    delays_gt = delays.copy()
-
-    return X, Z_gt, delays_gt
+    return X, Z_gt, delays_gt  # type: ignore
 
 
 def simulate_single_trials(

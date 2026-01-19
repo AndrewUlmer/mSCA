@@ -171,7 +171,7 @@ def bootstrap_delays_decoder(
     criterion = eval(f"{msca.loss_func}_f".lower())
 
     # Convert X into a data_loader
-    data_loader, _ = _convert_to_dataloader(X, shuffle=False)
+    data_loader, _ = convert_to_dataloader(X, shuffle=False)
 
     # Iterate through delays for each dimension
     performances = {}
