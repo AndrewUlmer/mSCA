@@ -1,0 +1,84 @@
+Comparison between ./mSCA-quest/msca and ./mSCA/msca
+
+1. General Overview
+   - `mSCA-quest/msca` appears to be a "research/experimental" branch containing additional evaluation tools, dimensionality estimation, and testing features.
+   - `mSCA/msca` appears to be a "refactored/production" branch with cleaner interfaces, type hinting, and automatic hyperparameter setting, but it lacks some utility methods like `save` and `load`.
+
+2. File Structure Differences
+   - `mSCA-quest` contains `evaluate.py` (missing in `mSCA`).
+   - `mSCA` contains `simulations.py` (missing in `mSCA-quest`).
+   - `mSCA-quest` imports `mSCA` from `.models` in `__init__.py`, while `mSCA` imports everything from `.simulations`, `.models`, and `.initializations`.
+
+3. Detailed File Comparisons
+
+   a. `models.py` (Core Logic)
+      - `mSCA-quest`:
+        - Contains `save(self, f: str)` and `load(self, f: str)` methods.
+        - Contains `predict(self, X: dict, mode: str = "evaluate")` which returns reconstructions.
+        - `fit` returns `train_losses, train_loss_dicts`.
+        - `__init__` has more explicit experimental parameters (e.g., `temperature`).
+      - `mSCA`:
+        - MISSING `save` and `load` methods.
+        - Has `transform(self, X: dict, mode: str = "transform")` which returns latents.
+        - Lacks a direct `predict` method for reconstructions (though `loop` supports it).
+        - `fit` returns `self, train_loss_dicts`.
+        - `fit` uses `_convert_to_dataloader` utility.
+        - Automatic hyperparameter initialization (lambda values) is more developed.
+        - Uses `self.device` parameter.
+
+   b. `architectures.py`
+      - `mSCA-quest`:
+        - Includes `Lambda` and `IndependentLatentCombiner` classes.
+        - `Encoder` and `Decoder` initialization is different (`_init` method vs inline).
+        - `mSCA_architecture` takes raw init arrays (`U`, `V`, `b_enc_init`, `b_dec_init`).
+        - `forward` takes `X, cd, half_trunc, mask`.
+      - `mSCA`:
+        - `Encoder` and `Decoder` take `init_encoder`, `init_decoder` dictionaries.
+        - `Decoder` uses `Sphere(dim=0)` parametrization for unit-norm constraint.
+        - `mSCA_architecture` takes structured init dicts.
+        - `forward` takes only `X`.
+
+   c. `initializations.py`
+      - `mSCA-quest`:
+        - Includes `_estimate_dimensionality` using bi-cross-validation (useful for research).
+        - Imports sklearn models (`MLPRegressor`, etc.).
+      - `mSCA`:
+        - Refactored initialization logic.
+        - Computes `lam_sparse`, `lam_orthog`, `lam_region`, `region_weights` automatically based on initial reconstruction loss logic.
+        - Returns `U`, `V`, `b_dec_init` plus hyperparameters, instead of just weights.
+
+   d. `loss_funcs.py`
+      - `mSCA-quest`:
+        - Contains `poisson_loss`, `gaussian_eval_loss`, `poisson_eval_loss` functions.
+        - Has `group_sparsity` and `correlaton_loss` functions.
+      - `mSCA`:
+        - Simplified `gaussian_f` and `poisson_f` wrappers that handle numpy/torch conversion and modes.
+        - Loss calculation logic seems moved or refactored (e.g., returning a dictionary of loss components).
+
+   e. `filters.py`
+      - `mSCA-quest`:
+        - Has `SigmaClamp` class.
+        - Uses `self.sigmas` and `self.decoder_sigmas`.
+      - `mSCA`:
+        - Uses `self.encoder_sigmas` and `self.decoder_sigmas`.
+        - Seems to enforce shared smoothing parameters in some contexts.
+
+   f. `utils.py`
+      - `mSCA`:
+        - Adds type hints.
+        - `gaussian_smooth` uses `mode="constant"` (vs `reflect`).
+        - Adds `torchify`, `pad_trials`, `to_list_of_dicts`, `to_named_tuples` utilities.
+      - `mSCA-quest`:
+        - Has `train_val_split_neurons` and `train_val_split_trials`.
+
+4. Summary of Functional Differences
+   - **Persistence**: `mSCA` cannot save/load models out of the box (Major Regression).
+   - **Inference**: `mSCA` has `transform` for latents, `mSCA-quest` has `predict` for reconstructions.
+   - **Initialization**: `mSCA` has smarter, automatic hyperparameter initialization.
+   - **Architecture**: `mSCA` uses PyTorch parametrizations for constraints, likely cleaner/more stable.
+   - **Evaluation**: `mSCA-quest` has more built-in evaluation and dimensionality estimation tools.
+
+Recommendation:
+- `mSCA` seems to be the target "clean" version.
+- Port `save`, `load`, and `predict` (or equivalent) from `mSCA-quest` to `mSCA`.
+- Port `_estimate_dimensionality` if that feature is still desired.
