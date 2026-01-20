@@ -1,5 +1,5 @@
 # mSCA dependency installations 
-To get started, it is recommended to run through the notebook in `quickstart.ipynb` but before you do, you'll need to install the following packages using the installer of your choice (e.g. `conda` or `pip`).
+To get started, it is recommended to run through the notebook in `quickstart.ipynb` but before you do, you'll need to install the following packages using the installer of your choice (e.g. `conda` or `pip`). Installing `pytorch` first will prevent issues with `numpy` installation.
 
 * `torch`
 * `scikit-learn`
