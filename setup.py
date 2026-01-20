@@ -1,0 +1,52 @@
+#! /usr/bin/env python
+import setuptools  # noqa; we are using a setuptools namespace
+
+# from numpy.distutils.core import setup
+from setuptools import setup, Extension
+
+descr = """Multi-region sparse components analysis (mSCA)"""
+
+DISTNAME = "msca"
+DESCRIPTION = descr
+MAINTAINER = "Andrew Ulmer"
+MAINTAINER_EMAIL = "andrew.ulmer@northwestern.edu"
+LICENSE = "BSD 3-Clause License"
+DOWNLOAD_URL = "https://github.com/AndrewUlmer/mSCA/tree/main"
+VERSION = "0.0.1.dev"
+
+
+if __name__ == "__main__":
+    setup(
+        name=DISTNAME,
+        maintainer=MAINTAINER,
+        maintainer_email=MAINTAINER_EMAIL,
+        description=DESCRIPTION,
+        license=LICENSE,
+        version=VERSION,
+        download_url=DOWNLOAD_URL,
+        long_description=open("README.md").read(),
+        long_description_content_type="text/markdown",
+        classifiers=[
+            "Intended Audience :: Science/Research",
+            "Intended Audience :: Developers",
+            "License :: OSI Approved",
+            "Programming Language :: Python",
+            "Topic :: Software Development",
+            "Topic :: Scientific/Engineering",
+            "Operating System :: Microsoft :: Windows",
+            "Operating System :: POSIX",
+            "Operating System :: Unix",
+            "Operating System :: MacOS",
+        ],
+        platforms="any",
+        packages=["msca"],
+        install_requires=[
+            "torch",
+            "geotorch",
+            "scikit-learn",
+            "scipy",
+            "matplotlib",
+            "tqdm",
+            "notebook",
+        ],
+    )
