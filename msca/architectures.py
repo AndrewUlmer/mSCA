@@ -367,7 +367,8 @@ class mSCA_architecture(nn.Module):
         Z_r_shift = self.filters(Z_r_shift, mode="decode")
 
         # Softshrink to allow thresholding of latents for each region
-        region_scaling = F.softshrink(self.decoder_scaling)
+        # region_scaling = F.softshrink(self.decoder_scaling)
+        region_scaling = F.tanhshrink(self.decoder_scaling)
 
         # Clamp region scalars between -1 and 1
         region_scaling = torch.clamp(region_scaling, min=-1.0, max=1.0)

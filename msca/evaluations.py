@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 from tqdm import tqdm
+from sklearn.linear_model import LinearRegression
+from sklearn.neural_network import MLPRegressor
 
 from .loss_funcs import *
 from .models import *
@@ -244,7 +246,75 @@ def bootstrap_performances(
 ) -> dict[int, np.ndarray]:
     """
     This reconstructs the neural activity randomly ablating neurons and
-    time-points to induce a distribution over loss values.
+    time-points to induce a distribution over loss values. It uses linear
+    regression instead of the learned decoder matrix.
+
+    Parameters
+    ----------
+    msca : mSCA object
+        A trained instantiation of mSCA
+    X : dict[str, np.ndarray]
+        Format described in quickstart.ipynb
+    num_bootstraps : int
+        Number of bootstraps to perform
+    """
+    # Set the criterion for evaluation
+    criterion = eval(f"{msca.loss_func}_f".lower())
+
+    # Convert X into a data_loader
+    data_loader, _ = convert_to_dataloader(X)
+
+    # Repeat for num_bootstraps
+    bootstrapped_losses = []
+    for _ in tqdm(range(num_bootstraps)):
+        # Now iterate through trials in the data_loader
+        loss = 0
+        for _, (X_target, trial_length) in enumerate(data_loader):
+            # Apply the mask to the inputs and outputs
+            X_input_masked, X_output_masked, output_mask, Z_mask, Z_r_mask = (
+                msca.cd.forward(
+                    X_target,
+                    trial_length,
+                )
+            )
+            # Perform a forward pass through the model
+            _, _, X_reconstruction = msca.model(X_input_masked)
+
+            # Mask the reconstruction
+            X_reconstruction_masked = msca.cd.mask(
+                X_reconstruction, truncate(output_mask, msca.trunc)
+            )
+
+            C = {
+                k: v / X_reconstruction_masked[k].norm(p=2)
+                for k, v in truncate(X_output_masked, msca.trunc).items()
+            }
+
+            # Mask the inputs + compute the reconstruction loss
+            loss += sum(
+                reconstruction_loss(
+                    X_reconstruction_masked,
+                    truncate(X_output_masked, msca.trunc),
+                    criterion,
+                    mode="train",
+                )
+            )
+
+        # Compute the percent difference in the loss with/without the delay
+        bootstrapped_losses.append(loss)
+
+    return np.array(bootstrapped_losses)
+
+
+@torch.no_grad()
+def bootstrap_latents_decoder(
+    msca: object, X: dict[str, np.ndarray], num_bootstraps: int = 1000
+) -> dict[int, np.ndarray]:
+    """
+    This reconstructs the neural activity with and without each dimension
+    and bootstraps over the differences in the loss function after
+    deleting the latent. If the loss increases after deleting
+    the latent, then that latent is important for reconstructing the data.
 
     Parameters
     ----------
@@ -261,11 +331,134 @@ def bootstrap_performances(
     # Convert X into a data_loader
     data_loader, _ = convert_to_dataloader(X, shuffle=False)
 
+    # Iterate through delays for each dimension
+    performances = {}
+    for i in tqdm(range(msca.n_components)):
+
+        # Repeat for num_bootstraps
+        diffs = []
+        for _ in tqdm(range(num_bootstraps)):
+            # Now iterate through trials in the data_loader
+            with_latent, without_latent = 0, 0
+            for _, (X_target, trial_length) in enumerate(data_loader):
+                # Apply the mask to the inputs and outputs
+                X_input_masked, X_output_masked, output_mask, Z_mask, Z_r_mask = (
+                    msca.cd.forward(
+                        X_target,
+                        trial_length,
+                    )
+                )
+
+                # Forward pass with time-delay
+                _, _, X_reconstruction_with_latent = msca.model(X_input_masked)
+
+                # Forward pass without latent
+                c = msca.model.decoder_scaling[i].data.clone()
+                msca.model.decoder_scaling[i] = 0
+                _, _, X_reconstruction_without_latent = msca.model(X_input_masked)
+
+                # Apply the output mask to the reconstructions
+                X_reconstruction_with_latent_masked = msca.cd.mask(
+                    X_reconstruction_with_latent, truncate(output_mask, msca.trunc)
+                )
+                X_reconstruction_without_latent_masked = msca.cd.mask(
+                    X_reconstruction_without_latent, truncate(output_mask, msca.trunc)
+                )
+
+                # Compute the reconstruction loss with the time-delay
+                with_latent += sum(
+                    reconstruction_loss(
+                        X_reconstruction_with_latent_masked,
+                        truncate(X_output_masked, msca.trunc),
+                        criterion,
+                        mode="train",
+                    )
+                )
+
+                # Compute the reconstruction loss without the time-delay
+                without_latent = sum(
+                    reconstruction_loss(
+                        X_reconstruction_without_latent_masked,
+                        truncate(X_output_masked, msca.trunc),
+                        criterion,
+                        mode="train",
+                    )
+                )
+
+                # Reset delay
+                msca.model.decoder_scaling[i] = c
+
+            # Compute the percent difference in the loss with/without the delay
+            diffs.append(100 * (without_latent - with_latent) / with_latent)
+
+        performances[i] = np.array(diffs)
+
+    return performances
+
+
+@torch.no_grad()
+def bootstrap_performances_separate_regressor(
+    msca: object,
+    X: dict[str, np.ndarray],
+    num_bootstraps: int = 1000,
+    threshold: float = 0.01,
+) -> dict[int, np.ndarray]:
+    """
+    This reconstructs the neural activity randomly ablating neurons and
+    time-points to induce a distribution over loss values. It uses linear
+    regression instead of the learned decoder matrix.
+
+    Parameters
+    ----------
+    msca : mSCA object
+        A trained instantiation of mSCA
+    X : dict[str, np.ndarray]
+        Format described in quickstart.ipynb
+    num_bootstraps : int
+        Number of bootstraps to perform
+    """
+    # Set the criterion for evaluation
+    criterion = eval(f"{msca.loss_func}_f".lower())
+
+    # Refine the latents before training decoder
+    performances = bootstrap_latents_decoder(msca, X, num_bootstraps=10)
+    for i in range(msca.n_components):
+        mean, lower = mean_confidence_interval(performances[i])
+
+        if lower <= threshold:
+            msca.model.decoder_scaling[i] = 0
+
+    # Infer latents for all the trials
+    Z = msca.transform(X)
+
+    # Concatenate latents and corresponding neural activity across all trials
+    Z_full = {k: np.concatenate(z) for k, z in Z.items()}
+    X_target_full = {
+        k: np.concatenate([x_i[msca.trunc] for x_i in x]) for k, x in X.items()
+    }
+
+    # Fit decoders for both regions
+    if msca.loss_func == "Poisson":
+        regressor = {
+            k: MLPRegressor().fit(Z_full[k], X_target_full[k]) for k in Z.keys()
+        }
+    elif msca.loss_func == "Gaussian":
+        regressor = {
+            k: LinearRegression().fit(Z_full[k], X_target_full[k]) for k in Z.keys()
+        }
+
+    # Transform sets the cd_rate = 0.0; change back
+    msca.cd.cd_rate = 0.5
+
+    # Convert X into a data_loader
+    data_loader, _ = convert_to_dataloader(X)
+
     # Repeat for num_bootstraps
     bootstrapped_losses = []
     for _ in tqdm(range(num_bootstraps)):
         # Now iterate through trials in the data_loader
         loss = 0
+        latents = {k: [] for k in X.keys()}
         for _, (X_target, trial_length) in enumerate(data_loader):
             # Apply the mask to the inputs and outputs
             X_input_masked, X_output_masked, output_mask, Z_mask, Z_r_mask = (
@@ -274,27 +467,43 @@ def bootstrap_performances(
                     trial_length,
                 )
             )
+            # Perform a forward pass through the model
+            _, Z_r, _ = msca.model(X_input_masked)
 
-            # Forward pass with time-delay
-            _, _, X_reconstruction = msca.model(X_input_masked)
+            # Compute the masked representations for each region
+            Z_r_masked = msca.cd.mask(Z_r, truncate(Z_r_mask, msca.trunc))
 
-            # Apply the output mask to the reconstructions
-            X_reconstruction_masked = msca.cd.mask(
-                X_reconstruction, truncate(output_mask, msca.trunc)
-            )
+            # Reshape inputs + convert to numpy for use with linear regression
+            Z_r_masked = {
+                k: v.flatten(start_dim=0, end_dim=1).numpy()
+                for k, v in Z_r_masked.items()
+            }
+
+            # Reshape the targets for sklearn regression as well
+            X_target = {
+                k: v[:, msca.trunc].flatten(start_dim=0, end_dim=1).numpy()
+                for k, v in X_target.items()
+            }
+
+            # Now make predictions
+            predictions = {k: v.predict(Z_r_masked[k]) for k, v in regressor.items()}
+
+            # Correct if needed for Poisson loss
+            if msca.loss_func == "Poisson":
+                predictions = {k: np.maximum(v, 0) for k, v in predictions.items()}
 
             # Compute the reconstruction loss with the time-delay
             loss += sum(
                 reconstruction_loss(
-                    X_reconstruction_masked,
-                    truncate(X_output_masked, msca.trunc),
+                    predictions,
+                    X_target,
                     criterion,
                     mode="train",
                 )
             )
 
         # Compute the percent difference in the loss with/without the delay
-        bootstrapped_losses.append(loss.numpy())
+        bootstrapped_losses.append(loss)
 
     return np.array(bootstrapped_losses)
 
@@ -308,31 +517,73 @@ def sparsity_sweep_bootstrap(
     """
     print(f"Performing sparsity sweep 🧹 --> saving results to {path}")
     performances = {}
-    for sparsity in np.arange(0.0, 1.05, 0.05):
+
+    # Use different ranges for different loss functions
+    if loss_func == "Gaussian":
+        sparsity_range = np.concatenate(
+            [np.array([0.0]), np.array([0.001, 0.01]), np.arange(0.05, 1.05, 0.05)]
+        )
+    elif loss_func == "Poisson":
+        sparsity_range = np.concatenate(
+            [np.array([0.0]), np.arange(0.01, 0.1005, 0.005), np.array([1.0])]
+        )
+
+    for sparsity in sparsity_range:
+        # Correcting weird np to python conversion
+        sparsity = float(f"{sparsity:0.3f}")
+
         # Instantiate mSCA with desired sparsity level
         msca = mSCA(
             n_components=n_components,
             n_epochs=n_epochs,
+            loss_func=loss_func,
+            lam_sparse=sparsity,
+            lam_region=0.0,
+        )
+        msca, losses = msca.fit(X)
+
+        # Perform bootstrap validation
+        bootstrapped_losses = bootstrap_performances_separate_regressor(msca, X)
+
+        # Store the performances
+        performances[sparsity] = bootstrapped_losses
+
+        # Save the losses to confirm the model converged
+        torch.save(
+            bootstrapped_losses,
+            f"{path}/bootstrapped_sparsity={sparsity.item():.2f}.pt",
+        )
+
+        # Save the model so we can retrieve the best model later
+        msca.save(f"{path}/msca_sparsity={sparsity.item():.2f}.pt")
+
+        # Save the losses (for checking convergence)
+        torch.save(losses, f"{path}/losses_sparsity={sparsity.item():.2f}.pt")
+
+    return performances
+
+
+def sparsity_sweep_bootstrap_evaluation(
+    n_components: int, loss_func: str, X: dict, path: str
+):
+    """
+    This loads in the results from performing a sparsity sweep
+    """
+    performances = {}
+    for sparsity in np.arange(0.0, 1.05, 0.05):
+        # Instantiate mSCA with desired sparsity level
+        msca = mSCA(
+            n_components=n_components,
+            n_epochs=1,
             loss_func=loss_func,
             lam_sparse=sparsity.item(),
         )
         msca, losses = msca.fit(X)
 
         # Perform bootstrap validation
-        bootstrapped_losses = bootstrap_performances(msca, X)
-        torch.save(
-            bootstrapped_losses, f"{path}/bootstrapped_sparsity={sparsity.item()}.pt"
-        )
-        performances[sparsity.item()] = bootstrapped_losses.mean()
+        bootstrapped_losses = bootstrap_performances(msca, X, num_bootstraps=100)
 
-        # Save the model
-        msca.save(f"{path}/msca_sparsity={sparsity.item()}.pt")
+        # Store the distribution
+        performances[sparsity] = bootstrapped_losses
 
-        # Save the losses (for checking convergence)
-        torch.save(losses, f"{path}/losses_sparsity={sparsity.item()}.pt")
-
-    # Unpack sparsity values and performances
-    sparsity_values = np.array(list(performances.keys()))
-    sparsity_performances = np.array(list(performances.values()))
-
-    return sparsity_values[sparsity_performances.argmin()]
+    return performances

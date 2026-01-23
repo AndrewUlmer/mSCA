@@ -270,7 +270,8 @@ def poisson_loss(
     l1 = torch.sum(torch.abs(z))
 
     # Compute the group-sparsity loss
-    gs = region_sparsity_loss(z, F.softshrink(scaling))
+    # gs = region_sparsity_loss(z, F.softshrink(scaling))
+    gs = region_sparsity_loss(z, F.tanhshrink(scaling))
 
     # Compute the orthogonality loss
     orth = torch.norm(V.T @ V - torch.eye(V.shape[1], device=V.device)) ** 2
