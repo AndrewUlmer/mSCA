@@ -49,15 +49,13 @@ if __name__ == "__main__":
     msca, losses = mSCA(
         n_components=args["n_components"],
         lam_sparse=args["lam_sparse"],
-        n_epochs=1,  # 8000,
+        n_epochs=8000,
         lam_region=0.0,
         loss_func="Poisson",
     ).fit(X)
 
     # Run evaluation
-    bootstrapped_losses = bootstrap_performances_separate_regressor(
-        msca, X, num_bootstraps=10
-    )
+    bootstrapped_losses = bootstrap_performances_separate_regressor(msca, X)
 
     # Save bootstrapped losses
     torch.save(

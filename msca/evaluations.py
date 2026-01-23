@@ -421,7 +421,7 @@ def bootstrap_performances_separate_regressor(
     criterion = eval(f"{msca.loss_func}_f".lower())
 
     # Refine the latents before training decoder
-    performances = bootstrap_latents_decoder(msca, X, num_bootstraps=10)
+    performances = bootstrap_latents_decoder(msca, X)
     for i in range(msca.n_components):
         mean, lower = mean_confidence_interval(performances[i])
 
