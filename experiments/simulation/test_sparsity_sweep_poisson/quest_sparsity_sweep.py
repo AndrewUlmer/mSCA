@@ -26,7 +26,7 @@ def get_params_by_id(path_to_file):
 
 if __name__ == "__main__":
     ### IMPORTANT: ADD PATH TO YOUR params.txt
-    experiment_path = "./experiments/simulation/sparsity_sweep/"
+    experiment_path = "./experiments/simulation/test_sparsity_sweep_poisson/"
     param_path = "params.txt"
 
     # IMPORTANT: ADD DATA LOADING CODE HERE
@@ -49,13 +49,13 @@ if __name__ == "__main__":
     msca, losses = mSCA(
         n_components=args["n_components"],
         lam_sparse=args["lam_sparse"],
-        n_epochs=8000,
+        n_epochs=1,  # 7000,
         lam_region=0.0,
         loss_func="Poisson",
     ).fit(X)
 
     # Run evaluation
-    bootstrapped_losses = bootstrap_performances_separate_regressor(msca, X)
+    bootstrapped_losses = bootstrap_performances(msca, X, num_bootstraps=10)
 
     # Save bootstrapped losses
     torch.save(

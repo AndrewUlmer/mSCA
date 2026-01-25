@@ -6,11 +6,14 @@ seed = 1
 
 torch.manual_seed(seed)
 
-# # Generate noisy simulated firing-rates, ground-truth latents, and delays
+# Generate noisy simulated firing-rates, ground-truth latents, and delays
 # X, Z_gt, delays_gt = simulate_trial_averages(random_seed=seed)
+
+# Let's presmooth the neural data to add correlations across time
 
 # Let's try now with simulated single-trials
 X, Z_gt, delays_gt = simulate_single_trials(random_seed=seed)
+# X_smoothed = presmooth(X)
 
 # # Visualization + example accessing attributes of X
 # colors = ["#D81B60", "#1E88E5"]
@@ -37,21 +40,43 @@ X, Z_gt, delays_gt = simulate_single_trials(random_seed=seed)
 #         axs[i, 2].set_xlabel("time (ms)")
 
 
-# msca, losses = mSCA(n_components=5 + 1, n_epochs=10, loss_func="Poisson").fit(X)
+# delay_effects = bootstrap_delays_decoder(msca, X_smoothed, mode="neurons")
 
-# performances = bootstrap_performances(msca, X, num_bootstraps=100)
+#
+# perfs = {}
+# for sparsity in [
+#     "0.00",
+#     "0.01",
+#     "0.02",
+#     "0.03",
+#     "0.04",
+#     "0.05",
+#     "0.06",
+#     "0.07",
+#     "0.08",
+#     "0.09",
+#     "0.10",
+#     "1.00",
+# ]:
+#     perf = torch.load(
+#         f"./experiments/simulation/sparsity_sweep/sparsity_sweep/bootstrapped_performance_n_components=6_lam_sparse={sparsity}.pt"
+#     )
+#     perfs[float(sparsity)] = perf
+# print("something")
+
+
+# msca, losses = mSCA(n_components=5, n_epochs=7000, loss_func="Poisson").fit(X)
+# performances = bootstrap_performances_separate_regressor(msca, X, num_bootstraps=100)
 
 performances = sparsity_sweep_bootstrap(
-    5, 3000, "Poisson", X, "./check_delete_later/test_sweep/"
+    5, 7000, "Poisson", X, "./check_delete_later/test_poisson_sweep/"
 )
-
 print("something")
 
 # # msca = mSCA(n_components=5 + 1, n_epochs=1)
 # # msca.fit(X)
 # # msca.load("./test.pt")
 
-# delay_effects = bootstrap_delays_decoder(msca, X)
 # msca_refined = refine_delays(msca, delay_effects)
 
 # # Grab the latents

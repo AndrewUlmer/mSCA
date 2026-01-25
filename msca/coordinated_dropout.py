@@ -19,13 +19,20 @@ class CoordinatedDropout:
         The convolutional filter length used in mSCA
     """
 
-    def __init__(self, n_components: int, cd_rate: float = 0.0, filter_len: int = 21):
+    def __init__(
+        self,
+        n_components: int,
+        cd_rate: float = 0.0,
+        filter_len: int = 21,
+        mode: str = "both",
+    ):
         if cd_rate < 0.0 or cd_rate > 0.99:
             raise ValueError("CD rate must be between 0 and 1")
         self.cd_rate = cd_rate
         self.scaling_factor = 1 / (1 - self.cd_rate)
         self.n_components = n_components
         self.filter_len = filter_len
+        self.mode = mode
 
     @torch.compile
     def mask(
@@ -65,11 +72,7 @@ class CoordinatedDropout:
         return tensor * mask.unsqueeze(-1)
 
     @torch.compile
-    def forward(
-        self,
-        X: dict[str, torch.Tensor],
-        trial_length: torch.Tensor,
-    ) -> tuple[
+    def forward(self, X: dict[str, torch.Tensor], trial_length: torch.Tensor) -> tuple[
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
@@ -88,16 +91,26 @@ class CoordinatedDropout:
         trial_length : torch.Tensor
             torch.Tensor of trial lengths in the batch.
         """
+        # grab first region name
+        k0 = list(X.keys())[0]
+
         # Only generate masks non-padded portion of trial
         if self.cd_rate == 0.0:
             input_mask = {k: torch.ones_like(v) for k, v in X.items()}
             output_mask = {k: torch.ones_like(v) for k, v in X.items()}
         else:
             # Generate the input mask for each region
-            input_mask = {
-                k: (torch.rand_like(v) > self.cd_rate).int()
-                for _, (k, v) in enumerate(X.items())
-            }
+            if self.mode == "both":
+                input_mask = {
+                    k: (torch.rand_like(v) > self.cd_rate).int()
+                    for _, (k, v) in enumerate(X.items())
+                }
+            elif self.mode == "neurons":
+                B, T, N = X[k0].shape
+                input_mask = {
+                    k: (torch.rand_like(v[0, 0]) > self.cd_rate).int().expand(B, T, -1)
+                    for _, (k, v) in enumerate(X.items())
+                }
 
             # Flip the input mask to get the output mask for each region
             output_mask = {k: 1 - input_mask[k] for k in X.keys()}
@@ -106,7 +119,6 @@ class CoordinatedDropout:
             input_mask = {k: self.scaling_factor * input_mask[k] for k in X.keys()}
 
         # Make mask for latents - don't want to incur sparsity for padding portion
-        k0 = list(X.keys())[0]
         Z_mask = torch.ones(X[k0].shape[0], X[k0].shape[1], self.n_components)
 
         # Make mask for post-conv latents - need to do this for visualization

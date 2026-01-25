@@ -8,6 +8,28 @@ from .loss_funcs import *
 from .models import *
 
 
+def pseudo_r2(predictions, X_target):
+    # Compute log-likelihood for saturated model
+    sat_ll = sum(reconstruction_loss(X_target, X_target, poisson_f, mode="train"))
+
+    # Compute the log-likelihood for the null model
+    mean_fr = {k: v.mean(axis=0) for k, v in X_target.items()}
+    mean_fr = {
+        k: np.stack([mean_fr[k]] * v.shape[0], axis=0) for k, v in X_target.items()
+    }
+    null_ll = sum(reconstruction_loss(mean_fr, X_target, poisson_f, mode="train"))
+
+    # Compute the actual log-likelihood
+    ll = sum(reconstruction_loss(predictions, X_target, poisson_f, mode="train"))
+
+    # Compute the pseudo-r2 - note these are NLLs
+    D_model = ll - sat_ll
+    D_null = null_ll - sat_ll
+    r2 = 1 - (D_model / D_null)
+
+    return r2
+
+
 def mean_confidence_interval(data: np.ndarray, confidence: float = 0.95):
     """
     Simply computes a one-sides confidence interval based on the bootstrap results
@@ -56,103 +78,11 @@ def refine_delays(
 
 
 @torch.no_grad()
-def bootstrap_delays_decoder_old(
-    msca: object, X: dict[str, np.ndarray], num_bootstraps: int = 10000
-) -> dict[int, np.ndarray]:
-    """
-    This reconstructs the neural activity with and without each dimensions'
-    time-delay and bootstraps over the differences in the loss function
-    after deleting the time-delay. If the loss increases after deleting
-    the delay, then that delay is important for reconstructing the data.
-
-    Parameters
-    ----------
-    msca : mSCA object
-        A trained instantiation of mSCA
-    X : dict[str, np.ndarray]
-        Format described in quickstart.ipynb
-    num_bootstraps : int
-        Number of bootstraps to perform
-    """
-
-    # Compute the predictions on all the data
-    X_hat = msca.predict(X, mode="evaluate")
-
-    # Concatenate the predictions across all trials
-    X_hat_cat = {k: np.concatenate(v, axis=0) for k, v in X_hat.items()}
-
-    # Concatenate the ground-truth across all trials
-    X_cat = {
-        k: np.concatenate([t[msca.trunc] for t in v], axis=0) for k, v in X.items()
-    }
-
-    # Set the correct evaluation function
-    criterion = eval(f"{msca.loss_func}_f".lower())
-
-    # Compute the baseline loss for each region
-    baseline_loss = {
-        k: criterion(X_hat_cat[k], X_cat[k], mode="evaluate") for k in X_hat_cat.keys()
-    }
-
-    # Multiply each region's baseline loss by the region weight
-    baseline_loss = {k: v * msca.region_weights[k] for k, v in baseline_loss.items()}
-
-    # Now iteratively remove the learned time-delays and compute the performance change
-    performance_changes = {i: [] for i in range(msca.n_components)}
-    for i in range(msca.n_components):
-        # Zero out the delay for the i-th dimension
-        current_delay = msca.model.filters.mus[i].clone()
-        msca.model.filters.mus.data[i] = 0
-
-        # Recompute the latent
-        X_hat_zeroed = msca.predict(X, mode="evaluate")
-
-        # Concatenate the predictions across all trials
-        X_hat_zeroed_cat = {
-            k: np.concatenate(v, axis=0) for k, v in X_hat_zeroed.items()
-        }
-
-        # Compute the element wise loss for each region
-        ew_loss = {
-            k: criterion(X_hat_zeroed_cat[k], X_cat[k], mode="evaluate")
-            for k in X_hat_cat.keys()
-        }
-
-        # Multiply each region's element-wise loss by the region weight
-        ew_loss = {k: v * msca.region_weights[k] for k, v in ew_loss.items()}
-
-        # Now compute the difference in the loss without the time-delay
-        diff = {k: ew_loss[k] - baseline_loss[k] for k, _ in ew_loss.items()}
-
-        # Concatenate the differences across regions
-        diff_concat = np.concatenate([v for _, v in diff.items()], axis=1)
-
-        # Now bootstrap over the differences (only neurons)
-        bootstrap_diffs = []
-        for _ in tqdm(range(num_bootstraps)):
-            # Randomly sample (with replacement) the difference in the loss with/without the delay
-            bootstrap_neuron_indices = np.random.choice(
-                diff_concat.shape[1], size=diff_concat.shape[1], replace=True
-            )
-
-            # Sum over bootstrapped neurons
-            bootstrapped_diff = diff_concat[:, bootstrap_neuron_indices].sum()
-
-            # Append bootstrap
-            bootstrap_diffs.append(bootstrapped_diff)
-
-        # Reset the time-delay
-        msca.model.filters.mus.data[i] = current_delay
-
-        # Store the bootstrap differences
-        performance_changes[i] = np.array(bootstrap_diffs)
-
-    return performance_changes
-
-
-@torch.no_grad()
 def bootstrap_delays_decoder(
-    msca: object, X: dict[str, np.ndarray], num_bootstraps: int = 1000
+    msca: object,
+    X: dict[str, np.ndarray],
+    num_bootstraps: int = 1000,
+    mode: str = "neurons",
 ) -> dict[int, np.ndarray]:
     """
     This reconstructs the neural activity with and without each dimensions'
@@ -175,6 +105,12 @@ def bootstrap_delays_decoder(
     # Convert X into a data_loader
     data_loader, _ = convert_to_dataloader(X, shuffle=False)
 
+    # Check loss func and convert cd if necessary
+    if msca.loss_func == "Gaussian":
+        msca.cd.mode = "neurons"
+    elif msca.loss_func == "Poisson":
+        msca.cd.mode = "both"
+
     # Iterate through delays for each dimension
     performances = {}
     for i in tqdm(range(msca.n_components)):
@@ -186,11 +122,9 @@ def bootstrap_delays_decoder(
             with_delay, without_delay = 0, 0
             for _, (X_target, trial_length) in enumerate(data_loader):
                 # Apply the mask to the inputs and outputs
-                X_input_masked, X_output_masked, output_mask, Z_mask, Z_r_mask = (
-                    msca.cd.forward(
-                        X_target,
-                        trial_length,
-                    )
+                X_input_masked, X_output_masked, output_mask, _, _ = msca.cd.forward(
+                    X_target,
+                    trial_length,
                 )
 
                 # Forward pass with time-delay
@@ -285,10 +219,10 @@ def bootstrap_performances(
                 X_reconstruction, truncate(output_mask, msca.trunc)
             )
 
-            C = {
-                k: v / X_reconstruction_masked[k].norm(p=2)
-                for k, v in truncate(X_output_masked, msca.trunc).items()
-            }
+            # C = {
+            #     k: v / X_reconstruction_masked[k].norm(p=2)
+            #     for k, v in truncate(X_output_masked, msca.trunc).items()
+            # }
 
             # Mask the inputs + compute the reconstruction loss
             loss += sum(
@@ -389,7 +323,7 @@ def bootstrap_latents_decoder(
                 msca.model.decoder_scaling[i] = c
 
             # Compute the percent difference in the loss with/without the delay
-            diffs.append(100 * (without_latent - with_latent) / with_latent)
+            diffs.append(100 * (without_latent - with_latent) / with_latent.abs())
 
         performances[i] = np.array(diffs)
 
@@ -402,6 +336,7 @@ def bootstrap_performances_separate_regressor(
     X: dict[str, np.ndarray],
     num_bootstraps: int = 1000,
     threshold: float = 0.01,
+    mode: str = "both",
 ) -> dict[int, np.ndarray]:
     """
     This reconstructs the neural activity randomly ablating neurons and
@@ -416,17 +351,25 @@ def bootstrap_performances_separate_regressor(
         Format described in quickstart.ipynb
     num_bootstraps : int
         Number of bootstraps to perform
+    mode : str
+        Whether to bootstrap over both neurons and time-points,
+        or just neurons
     """
     # Set the criterion for evaluation
     criterion = eval(f"{msca.loss_func}_f".lower())
 
-    # Refine the latents before training decoder
+    # Find relevant latents
     performances = bootstrap_latents_decoder(msca, X)
     for i in range(msca.n_components):
         mean, lower = mean_confidence_interval(performances[i])
-
         if lower <= threshold:
             msca.model.decoder_scaling[i] = 0
+
+    # Check loss func and convert cd if necessary
+    if msca.loss_func == "Gaussian":
+        msca.cd.mode = "neurons"
+    elif msca.loss_func == "Poisson":
+        msca.cd.mode = "both"
 
     # Infer latents for all the trials
     Z = msca.transform(X)
@@ -440,7 +383,8 @@ def bootstrap_performances_separate_regressor(
     # Fit decoders for both regions
     if msca.loss_func == "Poisson":
         regressor = {
-            k: MLPRegressor().fit(Z_full[k], X_target_full[k]) for k in Z.keys()
+            k: MLPRegressor(loss="poisson").fit(Z_full[k], X_target_full[k])
+            for k in Z.keys()
         }
     elif msca.loss_func == "Gaussian":
         regressor = {
@@ -451,7 +395,7 @@ def bootstrap_performances_separate_regressor(
     msca.cd.cd_rate = 0.5
 
     # Convert X into a data_loader
-    data_loader, _ = convert_to_dataloader(X)
+    data_loader, _ = convert_to_dataloader(X, batch_size=len(list(X.values())[0]))
 
     # Repeat for num_bootstraps
     bootstrapped_losses = []
@@ -460,13 +404,12 @@ def bootstrap_performances_separate_regressor(
         loss = 0
         latents = {k: [] for k in X.keys()}
         for _, (X_target, trial_length) in enumerate(data_loader):
-            # Apply the mask to the inputs and outputs
-            X_input_masked, X_output_masked, output_mask, Z_mask, Z_r_mask = (
-                msca.cd.forward(
-                    X_target,
-                    trial_length,
-                )
+            # Mask the inputs
+            X_input_masked, _, _, _, Z_r_mask = msca.cd.forward(
+                X_target,
+                trial_length,
             )
+
             # Perform a forward pass through the model
             _, Z_r, _ = msca.model(X_input_masked)
 
@@ -490,17 +433,19 @@ def bootstrap_performances_separate_regressor(
 
             # Correct if needed for Poisson loss
             if msca.loss_func == "Poisson":
-                predictions = {k: np.maximum(v, 0) for k, v in predictions.items()}
+                # predictions = {k: np.maximum(v, 0) for k, v in predictions.items()}
+                loss += pseudo_r2(predictions, X_target)
 
-            # Compute the reconstruction loss with the time-delay
-            loss += sum(
-                reconstruction_loss(
-                    predictions,
-                    X_target,
-                    criterion,
-                    mode="train",
+            elif msca.loss_func == "Gaussian":
+                # Compute the reconstruction loss on the bootstrapped inputs
+                loss += sum(
+                    reconstruction_loss(
+                        predictions,
+                        X_target,
+                        criterion,
+                        mode="train",
+                    )
                 )
-            )
 
         # Compute the percent difference in the loss with/without the delay
         bootstrapped_losses.append(loss)
@@ -525,7 +470,11 @@ def sparsity_sweep_bootstrap(
         )
     elif loss_func == "Poisson":
         sparsity_range = np.concatenate(
-            [np.array([0.0]), np.arange(0.01, 0.1005, 0.005), np.array([1.0])]
+            [
+                np.array([0.0]),
+                np.array([0.001]),
+                np.arange(0.01, 0.1005, 0.005),
+            ]
         )
 
     for sparsity in sparsity_range:
@@ -543,7 +492,7 @@ def sparsity_sweep_bootstrap(
         msca, losses = msca.fit(X)
 
         # Perform bootstrap validation
-        bootstrapped_losses = bootstrap_performances_separate_regressor(msca, X)
+        bootstrapped_losses = bootstrap_performances(msca, X)
 
         # Store the performances
         performances[sparsity] = bootstrapped_losses

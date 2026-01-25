@@ -26,7 +26,7 @@ def simulate_trial_averages(
     n_neurons: int = 100,  # Number of neurons per region
     max_shift: int = 5,  # Maximum time shift (in either direction)
     r_sim: int = 5,  # Number of simulated latent dimensions
-    noise_level: float = 0.1,  # Noise level for trials
+    noise_level: float = 0.2,  # Noise level for trials
     random_seed: int = 1,
 ) -> tuple[dict, dict, np.ndarray]:
     """

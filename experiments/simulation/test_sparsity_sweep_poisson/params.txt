@@ -19,4 +19,3 @@
 --lam_sparse 0.09 --n_components 6
 --lam_sparse 0.095 --n_components 6
 --lam_sparse 0.1 --n_components 6
---lam_sparse 1.0 --n_components 6
