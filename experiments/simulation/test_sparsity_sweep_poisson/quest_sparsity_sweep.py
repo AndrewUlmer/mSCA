@@ -49,26 +49,26 @@ if __name__ == "__main__":
     msca, losses = mSCA(
         n_components=args["n_components"],
         lam_sparse=args["lam_sparse"],
-        n_epochs=1,  # 7000,
+        n_epochs=7000,
         lam_region=0.0,
         loss_func="Poisson",
     ).fit(X)
 
     # Run evaluation
-    bootstrapped_losses = bootstrap_performances(msca, X, num_bootstraps=10)
+    bootstrapped_losses = bootstrap_performances(msca, X)
 
     # Save bootstrapped losses
     torch.save(
         bootstrapped_losses,
-        f"{experiment_path}bootstrapped_performance_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.2f}.pt",
+        f"{experiment_path}bootstrapped_performance_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
     )
 
     # Save the trained model and corresponding losses
     msca.save(
-        f"{experiment_path}msca_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.2f}.pt"
+        f"{experiment_path}msca_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt"
     )
     torch.save(
         losses,
-        f"{experiment_path}losses_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.2f}.pt",
+        f"{experiment_path}losses_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
     )
     print("something")

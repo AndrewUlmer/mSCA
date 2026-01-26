@@ -365,12 +365,6 @@ def bootstrap_performances_separate_regressor(
         if lower <= threshold:
             msca.model.decoder_scaling[i] = 0
 
-    # Check loss func and convert cd if necessary
-    if msca.loss_func == "Gaussian":
-        msca.cd.mode = "neurons"
-    elif msca.loss_func == "Poisson":
-        msca.cd.mode = "both"
-
     # Infer latents for all the trials
     Z = msca.transform(X)
 
@@ -383,7 +377,9 @@ def bootstrap_performances_separate_regressor(
     # Fit decoders for both regions
     if msca.loss_func == "Poisson":
         regressor = {
-            k: MLPRegressor(loss="poisson").fit(Z_full[k], X_target_full[k])
+            k: MLPRegressor(loss="poisson", max_iter=1000).fit(
+                Z_full[k], X_target_full[k]
+            )
             for k in Z.keys()
         }
     elif msca.loss_func == "Gaussian":
@@ -402,7 +398,6 @@ def bootstrap_performances_separate_regressor(
     for _ in tqdm(range(num_bootstraps)):
         # Now iterate through trials in the data_loader
         loss = 0
-        latents = {k: [] for k in X.keys()}
         for _, (X_target, trial_length) in enumerate(data_loader):
             # Mask the inputs
             X_input_masked, _, _, _, Z_r_mask = msca.cd.forward(
@@ -432,20 +427,20 @@ def bootstrap_performances_separate_regressor(
             predictions = {k: v.predict(Z_r_masked[k]) for k, v in regressor.items()}
 
             # Correct if needed for Poisson loss
-            if msca.loss_func == "Poisson":
-                # predictions = {k: np.maximum(v, 0) for k, v in predictions.items()}
-                loss += pseudo_r2(predictions, X_target)
+            # if msca.loss_func == "Poisson":
+            # predictions = {k: np.maximum(v, 0) for k, v in predictions.items()}
+            # loss += pseudo_r2(predictions, X_target)
 
-            elif msca.loss_func == "Gaussian":
-                # Compute the reconstruction loss on the bootstrapped inputs
-                loss += sum(
-                    reconstruction_loss(
-                        predictions,
-                        X_target,
-                        criterion,
-                        mode="train",
-                    )
+            # elif msca.loss_func == "Gaussian":
+            # Compute the reconstruction loss on the bootstrapped inputs
+            loss += sum(
+                reconstruction_loss(
+                    predictions,
+                    X_target,
+                    criterion,
+                    mode="train",
                 )
+            )
 
         # Compute the percent difference in the loss with/without the delay
         bootstrapped_losses.append(loss)
@@ -492,22 +487,22 @@ def sparsity_sweep_bootstrap(
         msca, losses = msca.fit(X)
 
         # Perform bootstrap validation
-        bootstrapped_losses = bootstrap_performances(msca, X)
+        bootstrapped_losses = bootstrap_performances_separate_regressor(msca, X)
 
         # Store the performances
         performances[sparsity] = bootstrapped_losses
 
-        # Save the losses to confirm the model converged
-        torch.save(
-            bootstrapped_losses,
-            f"{path}/bootstrapped_sparsity={sparsity.item():.2f}.pt",
-        )
+        # # Save the losses to confirm the model converged
+        # torch.save(
+        #     bootstrapped_losses,
+        #     f"{path}/bootstrapped_sparsity={sparsity.item():.2f}.pt",
+        # )
 
-        # Save the model so we can retrieve the best model later
-        msca.save(f"{path}/msca_sparsity={sparsity.item():.2f}.pt")
+        # # Save the model so we can retrieve the best model later
+        # msca.save(f"{path}/msca_sparsity={sparsity.item():.2f}.pt")
 
-        # Save the losses (for checking convergence)
-        torch.save(losses, f"{path}/losses_sparsity={sparsity.item():.2f}.pt")
+        # # Save the losses (for checking convergence)
+        # torch.save(losses, f"{path}/losses_sparsity={sparsity.item():.2f}.pt")
 
     return performances
 

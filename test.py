@@ -66,11 +66,9 @@ X, Z_gt, delays_gt = simulate_single_trials(random_seed=seed)
 
 
 # msca, losses = mSCA(n_components=5, n_epochs=7000, loss_func="Poisson").fit(X)
-# performances = bootstrap_performances_separate_regressor(msca, X, num_bootstraps=100)
+# performances = bootstrap_performances_separate_regressor(msca, X)
 
-performances = sparsity_sweep_bootstrap(
-    5, 7000, "Poisson", X, "./check_delete_later/test_poisson_sweep/"
-)
+performances = sparsity_sweep_bootstrap(5, 1000, "Poisson", X, "./check_delete_later/")
 print("something")
 
 # # msca = mSCA(n_components=5 + 1, n_epochs=1)

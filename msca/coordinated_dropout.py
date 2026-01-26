@@ -105,12 +105,6 @@ class CoordinatedDropout:
                     k: (torch.rand_like(v) > self.cd_rate).int()
                     for _, (k, v) in enumerate(X.items())
                 }
-            elif self.mode == "neurons":
-                B, T, N = X[k0].shape
-                input_mask = {
-                    k: (torch.rand_like(v[0, 0]) > self.cd_rate).int().expand(B, T, -1)
-                    for _, (k, v) in enumerate(X.items())
-                }
 
             # Flip the input mask to get the output mask for each region
             output_mask = {k: 1 - input_mask[k] for k in X.keys()}
