@@ -40,7 +40,6 @@ if __name__ == "__main__":
     # Grab parameters passed via cli
     parser = argparse.ArgumentParser()
     parser.add_argument("--lam_sparse", type=float, required=True)
-
     parser.add_argument("--n_components", type=int, required=True)
 
     # Read the specific parameters from the text file
@@ -54,14 +53,16 @@ if __name__ == "__main__":
     msca, losses = mSCA(
         n_components=args["n_components"],
         lam_sparse=args["lam_sparse"],
-        n_epochs=7000,
+        n_epochs=8000,
         lam_region=0.0,
         loss_func="Poisson",
         lam_orthog=0.0,
     ).fit(X)
 
     # Run evaluation
-    bootstrapped_losses = bootstrap_performances(msca, X)
+    bootstrapped_losses = bootstrap_performances_separate_regressor(
+        msca, X, num_bootstraps=100
+    )
 
     # Save bootstrapped losses
     torch.save(
@@ -77,4 +78,3 @@ if __name__ == "__main__":
         losses,
         f"{experiment_path}losses_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
     )
-    print("something")

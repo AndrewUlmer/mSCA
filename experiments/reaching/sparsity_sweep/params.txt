@@ -1,3 +1,5 @@
+--lam_sparse 0.0 --n_components 20
+--lam_sparse 0.001 --n_components 20
 --lam_sparse 0.01 --n_components 20
 --lam_sparse 0.015 --n_components 20 
 --lam_sparse 0.02 --n_components 20
