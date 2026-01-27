@@ -82,7 +82,7 @@ def bootstrap_delays_decoder(
     msca: object,
     X: dict[str, np.ndarray],
     num_bootstraps: int = 1000,
-    mode: str = "neurons",
+    mode: str = "both",
 ) -> dict[int, np.ndarray]:
     """
     This reconstructs the neural activity with and without each dimensions'
@@ -106,9 +106,9 @@ def bootstrap_delays_decoder(
     data_loader, _ = convert_to_dataloader(X, shuffle=False)
 
     # Check loss func and convert cd if necessary
-    if msca.loss_func == "Gaussian":
+    if mode == "neurons":
         msca.cd.mode = "neurons"
-    elif msca.loss_func == "Poisson":
+    elif mode == "both":
         msca.cd.mode = "both"
 
     # Iterate through delays for each dimension
@@ -167,7 +167,7 @@ def bootstrap_delays_decoder(
                 msca.model.filters.mus.data[i] = delay
 
             # Compute the percent difference in the loss with/without the delay
-            diffs.append(100 * (without_delay - with_delay) / with_delay)
+            diffs.append(100 * (without_delay - with_delay) / abs(with_delay))
 
         performances[i] = np.array(diffs)
 
@@ -310,7 +310,7 @@ def bootstrap_latents_decoder(
                 )
 
                 # Compute the reconstruction loss without the time-delay
-                without_latent = sum(
+                without_latent += sum(
                     reconstruction_loss(
                         X_reconstruction_without_latent_masked,
                         truncate(X_output_masked, msca.trunc),
@@ -479,7 +479,7 @@ def sparsity_sweep_bootstrap(
             ]
         )
 
-    for sparsity in sparsity_range:
+    for sparsity in sparsity_range[3:]:
         # Correcting weird np to python conversion
         sparsity = float(f"{sparsity:0.3f}")
 
@@ -488,8 +488,9 @@ def sparsity_sweep_bootstrap(
             n_components=n_components,
             n_epochs=n_epochs,
             loss_func=loss_func,
-            lam_sparse=sparsity,
+            lam_sparse=1.0,  # sparsity,
             lam_region=0.0,
+            lam_orthog=0.0,
         )
         msca, losses = msca.fit(X)
 

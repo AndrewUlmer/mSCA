@@ -34,7 +34,7 @@ class CoordinatedDropout:
         self.filter_len = filter_len
         self.mode = mode
 
-    @torch.compile
+    # @torch.compile
     def mask(
         self,
         X: Union[dict[str, torch.Tensor], torch.Tensor],
@@ -54,7 +54,7 @@ class CoordinatedDropout:
             X_masked = X * mask
         return X_masked
 
-    @torch.compile
+    # @torch.compile
     def mask_after_indices(self, tensor: torch.Tensor, lengths: torch.Tensor):
         """
         Sets all values after end of trial (stored in lengths) to 0.
@@ -71,7 +71,7 @@ class CoordinatedDropout:
         mask = positions < lengths.unsqueeze(1)
         return tensor * mask.unsqueeze(-1)
 
-    @torch.compile
+    # @torch.compile
     def forward(self, X: dict[str, torch.Tensor], trial_length: torch.Tensor) -> tuple[
         dict[str, torch.Tensor],
         dict[str, torch.Tensor],
@@ -104,6 +104,11 @@ class CoordinatedDropout:
                 input_mask = {
                     k: (torch.rand_like(v) > self.cd_rate).int()
                     for _, (k, v) in enumerate(X.items())
+                }
+            elif self.mode == "neurons":
+                input_mask = {
+                    k: (torch.rand(v.shape[-1]) > self.cd_rate).int().expand(v.shape)
+                    for k, v in X.items()
                 }
 
             # Flip the input mask to get the output mask for each region

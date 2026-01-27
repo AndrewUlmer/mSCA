@@ -30,7 +30,6 @@ if __name__ == "__main__":
     param_path = "params.txt"
 
     # IMPORTANT: ADD DATA LOADING CODE HERE
-    # X, Z_gt, delays_gt = simulate_single_trials(random_seed=0)
     data = torch.load("./experiments/reaching/data/x.pt")
     X = {
         "M1": [x.astype("float32") for x in data["M1"]],
@@ -60,15 +59,15 @@ if __name__ == "__main__":
     ).fit(X)
 
     # Run evaluation
-    bootstrapped_losses = bootstrap_performances_separate_regressor(
-        msca, X, num_bootstraps=100
-    )
+#    bootstrapped_losses = bootstrap_performances_separate_regressor(
+#        msca, X, num_bootstraps=100
+#    )
 
     # Save bootstrapped losses
-    torch.save(
-        bootstrapped_losses,
-        f"{experiment_path}bootstrapped_performance_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
-    )
+#    torch.save(
+#        bootstrapped_losses,
+#        f"{experiment_path}bootstrapped_performance_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
+#    )
 
     # Save the trained model and corresponding losses
     msca.save(
