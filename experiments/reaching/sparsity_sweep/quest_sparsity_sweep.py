@@ -26,11 +26,16 @@ def get_params_by_id(path_to_file):
 
 if __name__ == "__main__":
     ### IMPORTANT: ADD PATH TO YOUR params.txt
-    experiment_path = "./experiments/simulation/test_sparsity_sweep_poisson/"
+    experiment_path = "./experiments/reaching/sparsity_sweep/"
     param_path = "params.txt"
 
     # IMPORTANT: ADD DATA LOADING CODE HERE
-    X, Z_gt, delays_gt = simulate_single_trials(random_seed=0)
+    # X, Z_gt, delays_gt = simulate_single_trials(random_seed=0)
+    data = torch.load("./experiments/reaching/data/x.pt")
+    X = {
+        "M1": [x.astype("float32") for x in data["M1"]],
+        "PMd": [x.astype("float32") for x in data["PMd"]],
+    }
 
     # Grab parameters passed via cli
     parser = argparse.ArgumentParser()
@@ -52,6 +57,7 @@ if __name__ == "__main__":
         n_epochs=7000,
         lam_region=0.0,
         loss_func="Poisson",
+        lam_orthog=0.0,
     ).fit(X)
 
     # Run evaluation

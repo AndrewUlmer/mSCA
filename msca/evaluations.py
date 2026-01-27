@@ -358,8 +358,10 @@ def bootstrap_performances_separate_regressor(
     # Set the criterion for evaluation
     criterion = eval(f"{msca.loss_func}_f".lower())
 
+    ## TESTING: Removing this to see what works for MLP
+
     # Find relevant latents
-    performances = bootstrap_latents_decoder(msca, X)
+    performances = bootstrap_latents_decoder(msca, X, num_bootstraps=100)
     for i in range(msca.n_components):
         mean, lower = mean_confidence_interval(performances[i])
         if lower <= threshold:
@@ -377,9 +379,13 @@ def bootstrap_performances_separate_regressor(
     # Fit decoders for both regions
     if msca.loss_func == "Poisson":
         regressor = {
-            k: MLPRegressor(loss="poisson", max_iter=1000).fit(
-                Z_full[k], X_target_full[k]
-            )
+            k: MLPRegressor(
+                loss="poisson",
+                early_stopping=True,
+                max_iter=500,
+                activation="logistic",
+                random_state=0,
+            ).fit(Z_full[k], X_target_full[k])
             for k in Z.keys()
         }
     elif msca.loss_func == "Gaussian":
@@ -432,6 +438,7 @@ def bootstrap_performances_separate_regressor(
             # loss += pseudo_r2(predictions, X_target)
 
             # elif msca.loss_func == "Gaussian":
+
             # Compute the reconstruction loss on the bootstrapped inputs
             loss += sum(
                 reconstruction_loss(
