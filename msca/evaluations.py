@@ -4,27 +4,49 @@ from tqdm import tqdm
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
 
+from sklearn.linear_model import PoissonRegressor
+from sklearn.multioutput import MultiOutputRegressor
+
 from .loss_funcs import *
 from .models import *
 
 
-def pseudo_r2(predictions, X_target):
-    # Compute log-likelihood for saturated model
-    sat_ll = sum(reconstruction_loss(X_target, X_target, poisson_f, mode="train"))
+class PoissonRegressorWrapper:
+    def __init__(self, alpha):
+        self.alpha = alpha
+        return
 
-    # Compute the log-likelihood for the null model
-    mean_fr = {k: v.mean(axis=0) for k, v in X_target.items()}
-    mean_fr = {
-        k: np.stack([mean_fr[k]] * v.shape[0], axis=0) for k, v in X_target.items()
-    }
-    null_ll = sum(reconstruction_loss(mean_fr, X_target, poisson_f, mode="train"))
+    def fit(self, Z, X):
+        regressor = PoissonRegressor(alpha=self.alpha)
+        self.model = MultiOutputRegressor(regressor)
+        self.model.fit(Z, X)
+        return self
+
+    def predict(self, Z):
+        return self.model.predict(Z)
+
+
+def pseudo_r2(predictions, X_target, mean_fr):
+    # Compute log-likelihood for saturated model
+    # sat_ll = sum(reconstruction_loss(X_target, X_target, poisson_f, mode="train"))
+    sat_ll = torch.cat(
+        reconstruction_loss(X_target, X_target, poisson_f, mode="evaluate"), axis=1
+    )
+
+    # null_ll = sum(reconstruction_loss(mean_fr, X_target, poisson_f, mode="train"))
+    null_ll = torch.cat(
+        reconstruction_loss(mean_fr, X_target, poisson_f, mode="evaluate"), axis=1
+    )
 
     # Compute the actual log-likelihood
-    ll = sum(reconstruction_loss(predictions, X_target, poisson_f, mode="train"))
+    # ll = sum(reconstruction_loss(predictions, X_target, poisson_f, mode="train"))
+    ll = torch.cat(
+        reconstruction_loss(predictions, X_target, poisson_f, mode="evaluate"), axis=1
+    )
 
     # Compute the pseudo-r2 - note these are NLLs
-    D_model = ll - sat_ll
-    D_null = null_ll - sat_ll
+    D_model = ll.sum() - sat_ll.sum()
+    D_null = null_ll.sum() - sat_ll.sum()
     r2 = 1 - (D_model / D_null)
 
     return r2
@@ -219,11 +241,6 @@ def bootstrap_performances(
                 X_reconstruction, truncate(output_mask, msca.trunc)
             )
 
-            # C = {
-            #     k: v / X_reconstruction_masked[k].norm(p=2)
-            #     for k, v in truncate(X_output_masked, msca.trunc).items()
-            # }
-
             # Mask the inputs + compute the reconstruction loss
             loss += sum(
                 reconstruction_loss(
@@ -233,6 +250,10 @@ def bootstrap_performances(
                     mode="train",
                 )
             )
+
+            # loss += pseudo_r2(
+            #     X_reconstruction, {k: v[:, msca.trunc] for k, v in X_target.items()}
+            # )
 
         # Compute the percent difference in the loss with/without the delay
         bootstrapped_losses.append(loss)
@@ -334,8 +355,9 @@ def bootstrap_latents_decoder(
 def bootstrap_performances_separate_regressor(
     msca: object,
     X: dict[str, np.ndarray],
+    alpha: float = 0.0,
     num_bootstraps: int = 1000,
-    threshold: float = 0.01,
+    threshold: float = 0.1,  # 0.01
     mode: str = "both",
 ) -> dict[int, np.ndarray]:
     """
@@ -361,11 +383,11 @@ def bootstrap_performances_separate_regressor(
     ## TESTING: Removing this to see what works for MLP
 
     # Find relevant latents
-    performances = bootstrap_latents_decoder(msca, X, num_bootstraps=100)
-    for i in range(msca.n_components):
-        mean, lower = mean_confidence_interval(performances[i])
-        if lower <= threshold:
-            msca.model.decoder_scaling[i] = 0
+    # performances = bootstrap_latents_decoder(msca, X, num_bootstraps=10)
+    # for i in range(msca.n_components):
+    #     mean, lower = mean_confidence_interval(performances[i])
+    #     if lower <= threshold:
+    #         msca.model.decoder_scaling[i] = 0
 
     # Infer latents for all the trials
     Z = msca.transform(X)
@@ -378,16 +400,21 @@ def bootstrap_performances_separate_regressor(
 
     # Fit decoders for both regions
     if msca.loss_func == "Poisson":
+        # regressor = {
+        #     k: MLPRegressor(
+        #         loss="poisson",
+        #         early_stopping=True,
+        #         max_iter=500,
+        #         activation="logistic",
+        #         random_state=0,
+        #     ).fit(Z_full[k], X_target_full[k])
+        #     for k in Z.keys()
+        # }
         regressor = {
-            k: MLPRegressor(
-                loss="poisson",
-                early_stopping=True,
-                max_iter=500,
-                activation="logistic",
-                random_state=0,
-            ).fit(Z_full[k], X_target_full[k])
-            for k in Z.keys()
+            k: PoissonRegressorWrapper(alpha).fit(Z_full[k], X_target_full[k])
+            for k in X_target_full.keys()
         }
+
     elif msca.loss_func == "Gaussian":
         regressor = {
             k: LinearRegression().fit(Z_full[k], X_target_full[k]) for k in Z.keys()
@@ -406,7 +433,7 @@ def bootstrap_performances_separate_regressor(
         loss = 0
         for _, (X_target, trial_length) in enumerate(data_loader):
             # Mask the inputs
-            X_input_masked, _, _, _, Z_r_mask = msca.cd.forward(
+            X_input_masked, X_output_masked, output_mask, _, Z_r_mask = msca.cd.forward(
                 X_target,
                 trial_length,
             )
@@ -423,31 +450,54 @@ def bootstrap_performances_separate_regressor(
                 for k, v in Z_r_masked.items()
             }
 
-            # Reshape the targets for sklearn regression as well
-            X_target = {
+            # Flatten output mask
+            output_mask = {
                 k: v[:, msca.trunc].flatten(start_dim=0, end_dim=1).numpy()
-                for k, v in X_target.items()
+                for k, v in output_mask.items()
             }
 
             # Now make predictions
-            predictions = {k: v.predict(Z_r_masked[k]) for k, v in regressor.items()}
+            predictions = {
+                k: torch.tensor(v.predict(Z_r_masked[k])) for k, v in regressor.items()
+            }
+
+            # Now mask predictions with output mask
+            predictions_masked = msca.cd.mask(predictions, output_mask)
+
+            # Reshape masked output as well
+            X_output_masked = {
+                k: v[:, msca.trunc].flatten(start_dim=0, end_dim=1)
+                for k, v in X_output_masked.items()
+            }
 
             # Correct if needed for Poisson loss
-            # if msca.loss_func == "Poisson":
-            # predictions = {k: np.maximum(v, 0) for k, v in predictions.items()}
-            # loss += pseudo_r2(predictions, X_target)
-
-            # elif msca.loss_func == "Gaussian":
+            if msca.loss_func == "Poisson":
+                predictions_masked = {
+                    k: np.maximum(v, 0) for k, v in predictions_masked.items()
+                }
 
             # Compute the reconstruction loss on the bootstrapped inputs
             loss += sum(
                 reconstruction_loss(
-                    predictions,
-                    X_target,
+                    predictions_masked,
+                    X_output_masked,
                     criterion,
                     mode="train",
                 )
             )
+
+            # Make mean-fr for null model
+            # mean_fr = {
+            #     k: v.mean(axis=(0, 1)).expand(v.shape) for k, v in X_target.items()
+            # }
+            # mean_fr = {
+            #     k: v[:, msca.trunc].flatten(start_dim=0, end_dim=1)
+            #     for k, v in mean_fr.items()
+            # }
+            # mean_fr = msca.cd.mask(mean_fr, output_mask)
+
+            # Try using pseudo r2 instead
+            # loss += pseudo_r2(predictions_masked, X_output_masked, mean_fr)
 
         # Compute the percent difference in the loss with/without the delay
         bootstrapped_losses.append(loss)
