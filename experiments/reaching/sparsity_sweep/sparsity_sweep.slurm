@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=10	  # Total requested RAM will be 10 x 10 = 100G
 #SBATCH --mem-per-cpu=10G         # Adjust as needed
 #SBATCH --time=4:00:00            # Time required to run
-#SBATCH --array=1-30               # Array range must match lines in params.txt
+#SBATCH --array=1-25               # Array range must match lines in params.txt
 
 # Get the specific parameters for this array task
 PARAMS=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ./experiments/reaching/sparsity_sweep/params.txt)
@@ -19,4 +19,4 @@ source activate
 conda activate mSCA
 
 # Run your script
-python ./experiments/reaching/sparsity_sweep/quest_sparsity_sweep.py $PARAMS
+python ./experiments/reaching/sparsity_sweep/quest_sparsity_sweep_eval.py $PARAMS

@@ -17,7 +17,7 @@ class PoissonRegressorWrapper:
         return
 
     def fit(self, Z, X):
-        regressor = PoissonRegressor(alpha=self.alpha)
+        regressor = PoissonRegressor(alpha=self.alpha, solver="newton-cholesky")
         self.model = MultiOutputRegressor(regressor)
         self.model.fit(Z, X)
         return self
@@ -380,15 +380,6 @@ def bootstrap_performances_separate_regressor(
     # Set the criterion for evaluation
     criterion = eval(f"{msca.loss_func}_f".lower())
 
-    ## TESTING: Removing this to see what works for MLP
-
-    # Find relevant latents
-    # performances = bootstrap_latents_decoder(msca, X, num_bootstraps=10)
-    # for i in range(msca.n_components):
-    #     mean, lower = mean_confidence_interval(performances[i])
-    #     if lower <= threshold:
-    #         msca.model.decoder_scaling[i] = 0
-
     # Infer latents for all the trials
     Z = msca.transform(X)
 
@@ -400,16 +391,6 @@ def bootstrap_performances_separate_regressor(
 
     # Fit decoders for both regions
     if msca.loss_func == "Poisson":
-        # regressor = {
-        #     k: MLPRegressor(
-        #         loss="poisson",
-        #         early_stopping=True,
-        #         max_iter=500,
-        #         activation="logistic",
-        #         random_state=0,
-        #     ).fit(Z_full[k], X_target_full[k])
-        #     for k in Z.keys()
-        # }
         regressor = {
             k: PoissonRegressorWrapper(alpha).fit(Z_full[k], X_target_full[k])
             for k in X_target_full.keys()
@@ -485,19 +466,6 @@ def bootstrap_performances_separate_regressor(
                     mode="train",
                 )
             )
-
-            # Make mean-fr for null model
-            # mean_fr = {
-            #     k: v.mean(axis=(0, 1)).expand(v.shape) for k, v in X_target.items()
-            # }
-            # mean_fr = {
-            #     k: v[:, msca.trunc].flatten(start_dim=0, end_dim=1)
-            #     for k, v in mean_fr.items()
-            # }
-            # mean_fr = msca.cd.mask(mean_fr, output_mask)
-
-            # Try using pseudo r2 instead
-            # loss += pseudo_r2(predictions_masked, X_output_masked, mean_fr)
 
         # Compute the percent difference in the loss with/without the delay
         bootstrapped_losses.append(loss)

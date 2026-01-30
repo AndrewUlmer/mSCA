@@ -64,12 +64,15 @@ if __name__ == "__main__":
     )
 
     # Run evaluation
-    bootstrapped_losses = bootstrap_performances_separate_regressor(
-        msca, X, num_bootstraps=100
-    )
+    performances = {} 
+    for alpha in [0.0001, 0.01, 0.025, 0.05, 0.075, 0.1, 1.0]:
+        bootstrapped_losses = bootstrap_performances_separate_regressor(
+            msca, X, num_bootstraps=100, alpha=alpha
+        )
+        performances[alpha] = bootstrapped_losses
 
     # Save bootstrapped losses
     torch.save(
-        bootstrapped_losses,
-        f"{experiment_path}bootstrapped_performance_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
+        performances,
+        f"{experiment_path}bootstrapped_separate_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
     )

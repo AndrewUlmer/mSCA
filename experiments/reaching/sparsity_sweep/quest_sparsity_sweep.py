@@ -58,20 +58,20 @@ if __name__ == "__main__":
         lam_orthog=0.0,
     ).fit(X)
 
+    # Run evaluation
+#    bootstrapped_losses = bootstrap_performances_separate_regressor(
+#        msca, X, num_bootstraps=100
+#    )
+
+    # Save bootstrapped losses
+#    torch.save(
+#        bootstrapped_losses,
+#        f"{experiment_path}bootstrapped_performance_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
+#    )
+
     # Save the trained model and corresponding losses
     msca.save(
         f"{experiment_path}msca_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt"
-    )
-
-    # Run evaluation
-    bootstrapped_losses = bootstrap_performances_separate_regressor(
-        msca, X, num_bootstraps=100
-    )
-
-    # Save bootstrapped losses
-    torch.save(
-        bootstrapped_losses,
-        f"{experiment_path}bootstrapped_performance_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
     )
     torch.save(
         losses,
