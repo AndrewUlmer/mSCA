@@ -122,7 +122,7 @@ def _compute_relative_reconstruction_loss(
     l_rel = {k: (l_real[k] - l_perf[k]) for k in l_real.keys()}
 
     #### TESTING: NULL MODEL
-    l_rel = {k: np.abs(l_real[k] - l_null[k]) for k in l_real.keys()}
+    # l_rel = {k: np.abs(l_real[k] - l_null[k]) for k in l_real.keys()}
 
     return l_rel
 

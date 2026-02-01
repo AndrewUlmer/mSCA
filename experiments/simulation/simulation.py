@@ -30,13 +30,13 @@ sparsity_range = [
 ]
 pre = [
     torch.load(
-        f"./experiments/simulation/sparsity_sweep_decoder_single_trial/pre_{sparsity:.4f}.pt"
+        f"./experiments/simulation/sparsity_sweep_decoder_single_trial_null/pre_{sparsity:.4f}.pt"
     )
     for sparsity in sparsity_range
 ]
 post = [
     torch.load(
-        f"./experiments/simulation/sparsity_sweep_decoder_single_trial/post_{sparsity:.4f}.pt"
+        f"./experiments/simulation/sparsity_sweep_decoder_single_trial_null/post_{sparsity:.4f}.pt"
     )
     for sparsity in sparsity_range
 ]
