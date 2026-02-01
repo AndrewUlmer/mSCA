@@ -7,13 +7,13 @@ seed = 1
 torch.manual_seed(seed)
 
 # Generate noisy simulated firing-rates, ground-truth latents, and delays
-X, Z_gt, delays_gt = simulate_trial_averages(random_seed=seed)
+# X, Z_gt, delays_gt = simulate_trial_averages(random_seed=seed)
 
 # Let's presmooth the neural data to add correlations across time
 # X_smoothed = presmooth(X)
 
 # Let's try now with simulated single-trials
-# X, Z_gt, delays_gt = simulate_single_trials(random_seed=seed)
+X, Z_gt, delays_gt = simulate_single_trials(random_seed=seed)
 
 # # Visualization + example accessing attributes of X
 # colors = ["#D81B60", "#1E88E5"]
@@ -65,9 +65,9 @@ X, Z_gt, delays_gt = simulate_trial_averages(random_seed=seed)
 # print("something")
 
 # Fit the Gaussian model
-# msca, losses = mSCA(
-#     n_components=5, n_epochs=3000, loss_func="Gaussian", lam_sparse=0.5
-# ).fit(X)
+msca, losses = mSCA(
+    n_components=5, n_epochs=3000, loss_func="Poisson", lam_sparse=0.1, lam_region=0.0
+).fit(X)
 
 # Z = msca.transform(X)
 

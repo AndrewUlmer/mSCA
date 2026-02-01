@@ -4,9 +4,11 @@ from sklearn.decomposition import PCA
 from .utils import *
 from .loss_funcs import *
 
+from msca.evaluations import PoissonRegressorWrapper
+
 
 def _pca_reconstruction(
-    X: dict, n_components: int, loss_func: str
+    X: dict, n_components: int, loss_func: str, X_orig: dict  #### TESTING POISSON GLM
 ) -> tuple[np.ndarray, dict, dict, dict, dict]:
     """
     Computes the reconstruction of the neural activity using principal component analysis
@@ -51,6 +53,13 @@ def _pca_reconstruction(
     # Use ReLU to constrain reconstructions >= 0
     if loss_func == "Poisson":
         X_reconstruction = np.maximum(X_reconstruction, 0)
+
+    #### TESTING: USE POISSON GLM INSTEAD OF PCA + RELU
+
+    # concatenate X_orig
+    # x_orig_cat = np.concatenate([v for v in X_orig.values()], axis=1)
+    # glm = PoissonRegressorWrapper(alpha=0.001).fit(Z, x_orig_cat)
+    # X_reconstruction = glm.predict(Z)
 
     # Partitions back into regions
     X_reconstruction = split_into_regions(X_reconstruction, X)
@@ -100,12 +109,20 @@ def _compute_relative_reconstruction_loss(
     l_perf = eval_func(X_r_concat, X_r_concat, mode="evaluate")
     l_perf = {k: v.sum() for k, v in split_into_regions(l_perf, X_concat).items()}
 
+    #### TESTING: NULL MODEL
+    null = np.stack([X_r_concat.mean(axis=0)] * X_r_concat.shape[0])
+    l_null = eval_func(null, X_r_concat, mode="evaluate")
+    l_null = {k: v.sum() for k, v in split_into_regions(l_null, X_concat).items()}
+
     # Compute the reconstruction loss using the real reconstructions
     l_real = eval_func(X_r_reconstruction, X_r_concat, mode="evaluate")
     l_real = {k: v.sum() for k, v in split_into_regions(l_real, X_concat).items()}
 
     # Compute the relative reconstruction loss
     l_rel = {k: (l_real[k] - l_perf[k]) for k in l_real.keys()}
+
+    #### TESTING: NULL MODEL
+    l_rel = {k: np.abs(l_real[k] - l_null[k]) for k in l_real.keys()}
 
     return l_rel
 
@@ -304,7 +321,10 @@ def _initialize(
 
     # Compute the PCA reconstruction
     Z, U, V, X_reconstruction, b_dec_init = _pca_reconstruction(
-        X_smoothed_concat, n_components=n_components, loss_func=loss_func
+        X_smoothed_concat,
+        n_components=n_components,
+        loss_func=loss_func,
+        X_orig=X_concat,  ### TESTING POISSON GLM
     )
 
     # Compute the relative reconstruction loss

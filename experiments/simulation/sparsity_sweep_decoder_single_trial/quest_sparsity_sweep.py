@@ -53,7 +53,7 @@ if __name__ == "__main__":
     # This will save pre/post scaling
     msca, losses = mSCA(
         n_components=5,
-        n_epochs=7000,
+        n_epochs=8000,
         loss_func="Poisson",
         lam_sparse=args["lam_sparse"],
     ).fit(X)
