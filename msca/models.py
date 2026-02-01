@@ -224,7 +224,10 @@ class mSCA:
 
             elif epoch == self.n_epochs - 1000:
                 pre_scale_perf = bootstrap_performances(self, X)
-                torch.save(pre_scale_perf, f"./pre_{self.pre_lam_sparse:.4f}.pt")
+                torch.save(
+                    pre_scale_perf,
+                    f"./experiments/simulation/sparsity_sweep_decoder_single_trial/pre_{self.pre_lam_sparse:.4f}.pt",
+                )
 
             else:
                 self.model.mode = "post-hoc-scaling"
@@ -242,7 +245,10 @@ class mSCA:
 
         #### TESTING: POST-HOC SCALING
         post_scale_perf = bootstrap_performances(self, X)
-        torch.save(post_scale_perf, f"./post_{self.pre_lam_sparse:.4f}.pt")
+        torch.save(
+            post_scale_perf,
+            f"./experiments/simulation/sparsity_sweep_decoder_single_trial/post_{self.pre_lam_sparse:.4f}.pt",
+        )
 
         return self, train_loss_dicts
 
