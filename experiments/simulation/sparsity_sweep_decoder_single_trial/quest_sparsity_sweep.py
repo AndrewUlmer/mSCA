@@ -42,7 +42,6 @@ if __name__ == "__main__":
     # Grab parameters passed via cli
     parser = argparse.ArgumentParser()
     parser.add_argument("--lam_sparse", type=float, required=True)
-    parser.add_argument("--n_components", type=int, required=True)
 
     # Read the specific parameters from the text file
     file_args = get_params_by_id(experiment_path + param_path)
