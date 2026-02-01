@@ -7,6 +7,7 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.linear_model import PoissonRegressor
 from sklearn.multioutput import MultiOutputRegressor
 
+from msca import *
 from .loss_funcs import *
 from .models import *
 
@@ -497,7 +498,7 @@ def sparsity_sweep_bootstrap(
             ]
         )
 
-    for sparsity in sparsity_range[3:]:
+    for sparsity in sparsity_range:
         # Correcting weird np to python conversion
         sparsity = float(f"{sparsity:0.3f}")
 
@@ -506,17 +507,15 @@ def sparsity_sweep_bootstrap(
             n_components=n_components,
             n_epochs=n_epochs,
             loss_func=loss_func,
-            lam_sparse=1.0,  # sparsity,
-            lam_region=0.0,
-            lam_orthog=0.0,
+            lam_sparse=sparsity,
         )
         msca, losses = msca.fit(X)
 
         # Perform bootstrap validation
-        bootstrapped_losses = bootstrap_performances_separate_regressor(msca, X)
+        # bootstrapped_losses = bootstrap_performances(msca, X)
 
         # Store the performances
-        performances[sparsity] = bootstrapped_losses
+        # performances[sparsity] = bootstrapped_losses
 
         # # Save the losses to confirm the model converged
         # torch.save(

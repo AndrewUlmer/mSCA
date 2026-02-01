@@ -5,8 +5,13 @@ from tqdm import tqdm
 from .coordinated_dropout import *
 from .initializations import _initialize
 from .architectures import *
+
+
+# from msca import *
 from .loss_funcs import *
 from .utils import *
+
+# from msca.evaluations import bootstrap_performances
 
 
 def convert_to_dataloader(X, batch_size=64, shuffle=True):
@@ -113,6 +118,9 @@ class mSCA:
     def fit(
         self, X: dict[str, list[np.ndarray]]
     ) -> tuple[object, dict[str, np.ndarray]]:
+        #### POST-HOC SCALING
+        from msca.evaluations import bootstrap_performances
+
         # Store the names of the regions
         self.region_names = list(X.keys())
 
@@ -140,6 +148,9 @@ class mSCA:
             auto_region_weights if self.region_weights is None else self.region_weights
         )
         print(f"Using region-weights = {auto_region_weights}")
+
+        ##### TESTING POST-HOC SCALING
+        self.pre_lam_sparse = self.lam_sparse
 
         # Automatically set lam_sparse
         self.lam_sparse = (
@@ -178,6 +189,11 @@ class mSCA:
         # Define optimizer
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
+        #### TESTING POST-HOC SCALING
+        self.optimizer_post_hoc = torch.optim.Adam(
+            [{"params": self.model.C, "lr": 1e-3}]
+        )
+
         # Make coordinated dropout object
         self.cd = CoordinatedDropout(self.n_components, self.cd_rate, self.filter_len)
 
@@ -197,10 +213,23 @@ class mSCA:
         }
 
         # Iterate through training loop
-        for _ in tqdm(range(self.n_epochs)):
-            # Training step
-            self.criterion = train_criterion
-            _, _, loss_dict = self.loop(data_loader, mode="train")
+        for epoch in tqdm(range(self.n_epochs)):
+
+            ### TESTING POST-HOC SCALING
+            if epoch < self.n_epochs - 1000:
+
+                # Training step
+                self.criterion = train_criterion
+                _, _, loss_dict = self.loop(data_loader, mode="train")
+
+            elif epoch == self.n_epochs - 1000:
+                pre_scale_perf = bootstrap_performances(self, X)
+                torch.save(pre_scale_perf, f"./pre_{self.pre_lam_sparse:.4f}.pt")
+
+            else:
+                self.model.mode = "post-hoc-scaling"
+                _, _, loss_dict = self.loop(data_loader, mode="post-hoc-scaling")
+                print(self.model.C)
 
             # Store training loss
             train_loss_dicts["reconstruction"].append(loss_dict["reconstruction"])
@@ -210,6 +239,11 @@ class mSCA:
 
         # Concatenate training losses over all epochs
         train_loss_dicts = {k: np.array(v) for k, v in train_loss_dicts.items()}
+
+        #### TESTING: POST-HOC SCALING
+        post_scale_perf = bootstrap_performances(self, X)
+        torch.save(post_scale_perf, f"./post_{self.pre_lam_sparse:.4f}.pt")
+
         return self, train_loss_dicts
 
     def loop(
@@ -268,6 +302,21 @@ class mSCA:
                 loss.backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
+
+            #### TESTING POST-HOC SCALING
+            elif mode == "post-hoc-scaling":
+                r_loss_f = eval(self.loss_func.lower() + "_f")
+                r_loss = sum(
+                    reconstruction_loss(
+                        X_reconstruction_masked,
+                        truncate(X_output_masked, self.trunc),
+                        r_loss_f,
+                        mode="train",
+                    )
+                )
+                r_loss.backward()
+                self.optimizer_post_hoc.step()
+                self.optimizer_post_hoc.zero_grad(set_to_none=True)
 
             # Accumulate loss
             if mode == "train":

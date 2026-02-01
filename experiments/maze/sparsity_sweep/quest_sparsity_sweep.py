@@ -51,24 +51,13 @@ if __name__ == "__main__":
     # Let's train mSCA with the current values
     msca, losses = mSCA(
         n_components=args["n_components"],
-        lam_sparse=0.01,  # args["lam_sparse"],
+        lam_sparse=args["lam_sparse"],
         n_epochs=8000,
         lam_region=0.0,
         loss_func="Poisson",
         lam_orthog=0.0,
         filter_len=21,
     ).fit(X)
-
-    # Run evaluation
-    #    bootstrapped_losses = bootstrap_performances_separate_regressor(
-    #        msca, X, num_bootstraps=100
-    #    )
-
-    # Save bootstrapped losses
-    #    torch.save(
-    #        bootstrapped_losses,
-    #        f"{experiment_path}bootstrapped_performance_n_components={args['n_components']}_lam_sparse={args['lam_sparse']:.3f}.pt",
-    #    )
 
     # Save the trained model and corresponding losses
     msca.save(

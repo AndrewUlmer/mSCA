@@ -279,6 +279,9 @@ class mSCA_architecture(nn.Module):
         self.linear = linear
         self.loss_func = loss_func
 
+        #### TESTING POST-HOC SCALING
+        self.mode = "train"
+
         # Initialize the encoder
         self.encoder = Encoder(init_encoder, self.linear)
         self.encoder_scaling = nn.Parameter(
@@ -302,17 +305,8 @@ class mSCA_architecture(nn.Module):
             self.n_components, len(self.region_sizes), filter_length, max_smoothing
         )
 
-        # TESTING: add input bias
-        # self.input_bias_x0 = nn.Parameter(
-        #     torch.zeros(
-        #         100,
-        #     )
-        # )
-        # self.input_bias_x1 = nn.Parameter(
-        #     torch.zeros(
-        #         100,
-        #     )
-        # )
+        # TESTING: POST-HOC SCALING
+        self.C = nn.Parameter(torch.ones(self.n_components))
 
     def forward(self, X: dict) -> tuple[
         torch.Tensor,  # latent combined across regions
@@ -375,6 +369,10 @@ class mSCA_architecture(nn.Module):
 
         # Apply the region-wise scaling parameter
         Z_r = {k: Z_r_shift[k] * region_scaling[:, i] for i, k in enumerate(Z_r.keys())}
+
+        #### TESTING: POST-HOC-SCALING
+        if self.mode == "post-hoc-scaling":
+            Z_r = {k: v * self.C for k, v in Z_r.items()}
 
         # Reconstruct the input data
         X_reconstruction = self.decoder(Z_r)

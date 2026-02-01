@@ -10,7 +10,7 @@ torch.manual_seed(seed)
 X, Z_gt, delays_gt = simulate_trial_averages(random_seed=seed)
 
 # Let's presmooth the neural data to add correlations across time
-X_smoothed = presmooth(X)
+# X_smoothed = presmooth(X)
 
 # Let's try now with simulated single-trials
 # X, Z_gt, delays_gt = simulate_single_trials(random_seed=seed)
@@ -65,7 +65,12 @@ X_smoothed = presmooth(X)
 # print("something")
 
 # Fit the Gaussian model
-msca, losses = mSCA(n_components=5, n_epochs=4000, loss_func="Gaussian").fit(X_smoothed)
+# msca, losses = mSCA(
+#     n_components=5, n_epochs=3000, loss_func="Gaussian", lam_sparse=0.5
+# ).fit(X)
+
+# Z = msca.transform(X)
+
 
 # Now perform bootstrapping over neurons instead of neurons and time-points (needed for pre-smoothed data)
 # delay_effects_n = bootstrap_delays_decoder(msca, X_smoothed, mode="neurons")
@@ -78,10 +83,11 @@ msca, losses = mSCA(n_components=5, n_epochs=4000, loss_func="Gaussian").fit(X_s
 # TODO: if MLP tuning proves to be too much on Miller lab data, can try linear regression with ReLU
 #       Maybe there's even a settting for MLP regressor that has the appropriate number of layer to match the decoder?
 
-performances = bootstrap_performances_separate_regressor(msca, X, mode="neurons")
+# performances = bootstrap_performances_separate_regressor(msca, X, mode="neurons")
 
-# performances = sparsity_sweep_bootstrap(5, 1000, "Poisson", X, "./check_delete_later/")
-# print("something")
+performances = sparsity_sweep_bootstrap(5, 6000, "Gaussian", X, "./check_delete_later/")
+
+print("something")
 
 # # msca = mSCA(n_components=5 + 1, n_epochs=1)
 # # msca.fit(X)
