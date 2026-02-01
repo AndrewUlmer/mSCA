@@ -7,8 +7,8 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.linear_model import PoissonRegressor
 from sklearn.multioutput import MultiOutputRegressor
 
-from msca import *
 from .loss_funcs import *
+
 from .models import *
 
 

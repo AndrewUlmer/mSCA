@@ -226,7 +226,7 @@ class mSCA:
                 pre_scale_perf = bootstrap_performances(self, X)
                 torch.save(
                     pre_scale_perf,
-                    f"./experiments/simulation/sparsity_sweep_decoder_single_trial/pre_{self.pre_lam_sparse:.4f}.pt",
+                    f"./experiments/simulation/sparsity_sweep_decoder_single_trial_null/pre_{self.pre_lam_sparse:.4f}.pt",
                 )
 
             else:
@@ -247,7 +247,7 @@ class mSCA:
         post_scale_perf = bootstrap_performances(self, X)
         torch.save(
             post_scale_perf,
-            f"./experiments/simulation/sparsity_sweep_decoder_single_trial/post_{self.pre_lam_sparse:.4f}.pt",
+            f"./experiments/simulation/sparsity_sweep_decoder_single_trial_null/post_{self.pre_lam_sparse:.4f}.pt",
         )
 
         return self, train_loss_dicts

@@ -1,0 +1,10 @@
+Circular import detected between `msca/models.py` and `msca/evaluations.py`.
+
+1. `msca/models.py` imports `bootstrap_performances` from `msca/evaluations.py`.
+   - `from msca.evaluations import bootstrap_performances`
+
+2. `msca/evaluations.py` imports `mSCA` from `msca/__init__.py` (which in turn imports from `msca/models.py`), and also imports `*` from `msca/models.py`.
+   - `from msca import mSCA`
+   - `from .models import *`
+
+This creates a circular dependency where each module attempts to import the other, which can lead to `ImportError` exceptions at runtime.

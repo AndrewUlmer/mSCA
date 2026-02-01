@@ -4,7 +4,7 @@ from sklearn.decomposition import PCA
 from .utils import *
 from .loss_funcs import *
 
-from msca.evaluations import PoissonRegressorWrapper
+# from msca.evaluations import PoissonRegressorWrapper
 
 
 def _pca_reconstruction(
