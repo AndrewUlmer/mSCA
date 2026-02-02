@@ -189,11 +189,6 @@ class mSCA:
         # Define optimizer
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
-        #### TESTING POST-HOC SCALING
-        self.optimizer_post_hoc = torch.optim.Adam(
-            [{"params": self.model.C, "lr": 1e-3}]
-        )
-
         # Make coordinated dropout object
         self.cd = CoordinatedDropout(self.n_components, self.cd_rate, self.filter_len)
 
@@ -226,13 +221,31 @@ class mSCA:
                 pre_scale_perf = bootstrap_performances(self, X)
                 torch.save(
                     pre_scale_perf,
-                    f"./experiments/reaching/sparsity_sweep_orth_post_hoc/pre_{self.pre_lam_sparse:.4f}.pt",
+                    f"./experiments/simulation/sparsity_sweep_decoder_post_hoc/pre_{self.pre_lam_sparse:.4f}.pt",
+                )
+
+                # Freeze all model weights
+                for param in self.model.parameters():
+                    param.requires_grad = False
+
+                # Switch mSCA's decoder
+                pre_decoder_w = self.model.decoder.model.weight.data
+                pre_decoder_b = self.model.decoder.model.bias
+
+                # Set new decoder
+                new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
+                new_decoder.weight.data = pre_decoder_w
+                new_decoder.bias.data = pre_decoder_b
+                self.model.decoder.model = new_decoder
+
+                # Add to optimizer
+                self.optimizer_post_hoc = torch.optim.Adam(
+                    [{"params": self.model.decoder.model.parameters(), "lr": 1e-3}]
                 )
 
             else:
                 self.model.mode = "post-hoc-scaling"
                 _, _, loss_dict = self.loop(data_loader, mode="post-hoc-scaling")
-                print(self.model.C)
 
             # Store training loss
             train_loss_dicts["reconstruction"].append(loss_dict["reconstruction"])
@@ -247,10 +260,10 @@ class mSCA:
         post_scale_perf = bootstrap_performances(self, X)
         torch.save(
             post_scale_perf,
-            f"./experiments/reaching/sparsity_sweep_orth_post_hoc/post_{self.pre_lam_sparse:.4f}.pt",
+            f"./experiments/simulation/sparsity_sweep_decoder_post_hoc/post_{self.pre_lam_sparse:.4f}.pt",
         )
 
-        return self, train_loss_dicts
+        return self, None  # train_loss_dicts
 
     def loop(
         self, data_loader: torch.utils.data.DataLoader, mode: str = "train"

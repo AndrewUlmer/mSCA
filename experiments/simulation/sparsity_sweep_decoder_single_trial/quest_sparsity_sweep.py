@@ -29,7 +29,7 @@ def get_params_by_id(path_to_file):
 
 if __name__ == "__main__":
     # Set experiment path to load parameters from
-    experiment_path = "./experiments/simulation/sparsity_sweep_decoder_single_trial/"
+    experiment_path = "./experiments/simulation/sparsity_sweep_decoder_post_hoc/"
     param_path = "params.txt"
 
     # Load in the dataset (simulated)

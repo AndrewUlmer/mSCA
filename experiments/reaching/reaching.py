@@ -11,7 +11,7 @@ import matplotlib.patches as mpatches
 
 if __name__ == "__main__":
     ### IMPORTANT: ADD PATH TO YOUR params.txt
-    experiment_path = "./experiments/reaching/sparsity_sweep_orth/"
+    experiment_path = "./experiments/reaching/sparsity_sweep_orth_post_hoc/"
     param_path = "params.txt"
 
     # IMPORTANT: ADD DATA LOADING CODE HERE
@@ -50,34 +50,34 @@ if __name__ == "__main__":
         0.5,
     ]:
 
-        # # Let's train mSCA with the current values
-        # msca, losses = mSCA(
-        #     n_components=20,
-        #     lam_sparse=0.0,
-        #     n_epochs=1,  # 8000,
-        #     lam_region=0.0,
-        #     loss_func="Poisson",
-        # ).fit(X)
+        # Let's train mSCA with the current values
+        msca, losses = mSCA(
+            n_components=20,
+            lam_sparse=0.0,
+            n_epochs=1,  # 8000,
+            lam_region=0.0,
+            loss_func="Poisson",
+        ).fit(X)
 
         # # # Load in the trained model
-        # msca.load(f"{experiment_path}msca_n_components=20_lam_sparse={sparsity:.3f}.pt")
+        msca.load(f"{experiment_path}msca_n_components=20_lam_sparse={sparsity:.3f}.pt")
 
         # # Transform the latents for plotting purposes
-        # Z = msca.transform(X)
+        Z = msca.transform(X)
 
-        # # Plot the latents
-        # fig, axs = plt.subplots(20, 8, figsize=(10, 10))
+        # Plot the latents
+        fig, axs = plt.subplots(20, 8, figsize=(10, 10))
 
-        # colors = [
-        #     "#e60000",
-        #     "#ff9900",
-        #     "#663300",
-        #     "#33cc00",
-        #     "#00cccc",
-        #     "#0000ff",
-        #     "#a366ff",
-        #     "#ff00ff",
-        # ]
+        colors = [
+            "#e60000",
+            "#ff9900",
+            "#663300",
+            "#33cc00",
+            "#00cccc",
+            "#0000ff",
+            "#a366ff",
+            "#ff00ff",
+        ]
 
         # indices = [
         #     np.stack(
@@ -91,33 +91,36 @@ if __name__ == "__main__":
         #     for i in range(20)
         # ]
 
-        # for reach_dir in range(8):
-        #     # Select a random trial from that reach direction
-        #     # trial_idx = indices[reach_dir]
-        #     trial_idx = np.random.choice(np.arange(500))
-        #     min_bounds = np.minimum(
-        #         np.concatenate(Z["M1"], axis=0).min(axis=0),
-        #         np.concatenate(Z["PMd"], axis=0).min(axis=0),
-        #     )
-        #     max_bounds = np.maximum(
-        #         np.concatenate(Z["M1"], axis=0).max(axis=0),
-        #         np.concatenate(Z["PMd"], axis=0).max(axis=0),
-        #     )
-        #     for i, j in enumerate(range(20)):
-        #         axs[i, reach_dir].plot(
-        #             Z["M1"][trial_idx][:, j], color=colors[reach_dir]
-        #         )
-        #         axs[i, reach_dir].plot(
-        #             Z["PMd"][trial_idx][:, j], color=colors[reach_dir], ls=":"
-        #         )
-        #         axs[i, reach_dir].set_ylim(min_bounds[j] - 0.1, max_bounds[j] + 0.1)
+        for reach_dir in range(8):
+            # Select a random trial from that reach direction
+            # trial_idx = indices[reach_dir]
+            # trial_idx = np.random.choice(np.arange(100))
+            trial_idx = np.random.choice(
+                np.where(data["reach_dirs"].astype("int32") == reach_dir)[0]
+            )
+            min_bounds = np.minimum(
+                np.concatenate(Z["M1"], axis=0).min(axis=0),
+                np.concatenate(Z["PMd"], axis=0).min(axis=0),
+            )
+            max_bounds = np.maximum(
+                np.concatenate(Z["M1"], axis=0).max(axis=0),
+                np.concatenate(Z["PMd"], axis=0).max(axis=0),
+            )
+            for i, j in enumerate(range(20)):
+                axs[i, reach_dir].plot(
+                    Z["M1"][trial_idx][:, j], color=colors[reach_dir]
+                )
+                axs[i, reach_dir].plot(
+                    Z["PMd"][trial_idx][:, j], color=colors[reach_dir], ls=":"
+                )
+                axs[i, reach_dir].set_ylim(min_bounds[j] - 0.1, max_bounds[j] + 0.1)
 
-        #         if reach_dir > 0:
-        #             axs[i, reach_dir].set_yticks([])
-        #         if i < 11:
-        #             axs[i, reach_dir].set_xticks([])
+                if reach_dir > 0:
+                    axs[i, reach_dir].set_yticks([])
+                if i < 11:
+                    axs[i, reach_dir].set_xticks([])
 
-        # print("something")
+        print("something")
 
         performance = torch.load(
             f"./experiments/reaching/sparsity_sweep_orth/bootstrapped_separate_n_components=20_lam_sparse={sparsity:.3f}.pt"
