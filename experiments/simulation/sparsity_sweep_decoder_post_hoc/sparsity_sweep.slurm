@@ -10,7 +10,7 @@
 #SBATCH --array=1-25               # Array range must match lines in params.txt
 
 # Get the specific parameters for this array task
-PARAMS=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ./experiments/simulation/sparsity_sweep_decoder_single_trial/params.txt)
+PARAMS=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ./experiments/simulation/sparsity_sweep_decoder_post_hoc/params.txt)
 
 echo "Running job ${SLURM_ARRAY_TASK_ID} with params: $PARAMS"
 
@@ -19,4 +19,4 @@ source activate
 conda activate mSCA
 
 # Run your script
-python ./experiments/simulation/sparsity_sweep_decoder_single_trial/quest_sparsity_sweep.py $PARAMS
+python ./experiments/simulation/sparsity_sweep_decoder_post_hoc/quest_sparsity_sweep.py $PARAMS

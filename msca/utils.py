@@ -1,7 +1,9 @@
 import torch
 import numpy as np
 import scipy as sp
+from random import shuffle
 from collections import namedtuple
+from sklearn.model_selection import KFold
 
 
 def gaussian_smooth(x: np.ndarray, sigma: float) -> np.ndarray:
@@ -356,3 +358,33 @@ def inv_softplus(x: np.ndarray, beta=5.0) -> np.ndarray:
     Inverse softplus function used to initialize the decoder biases.
     """
     return (1 / beta) * np.log(np.exp(beta * x) - 1)
+
+
+def bi_cross_validation_neuron_indices(X, n_splits=5):
+    """
+    This will create bi-cross-validation indices (across neurons)
+
+    X : dict
+        Dictionary of neural data described in quickstart.ipynb
+    n_splits : int
+        The number of splits across neurons to do
+    """
+
+    # Get the number of neurons for each region
+    k0 = list(X.keys())[0]
+    if isinstance(X[k0], list):
+        n_neurons = {k: v[0].shape[1] for k, v in X.items()}
+    else:
+        n_neurons = {k: v.shape[1] for k, v in X.items()}
+
+    # Create random splits for each region
+    idxs = {k: np.arange(v) for k, v in n_neurons.items()}
+    bcv_train_idxs = {k: [] for k in X.keys()}
+    bcv_test_idxs = {k: [] for k in X.keys()}
+    for k in X.keys():
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+        for train_index, test_index in kf.split(idxs[k]):
+            bcv_train_idxs[k].append(train_index)
+            bcv_test_idxs[k].append(test_index)
+
+    return bcv_train_idxs, bcv_test_idxs

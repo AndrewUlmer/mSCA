@@ -109,20 +109,12 @@ def _compute_relative_reconstruction_loss(
     l_perf = eval_func(X_r_concat, X_r_concat, mode="evaluate")
     l_perf = {k: v.sum() for k, v in split_into_regions(l_perf, X_concat).items()}
 
-    #### TESTING: NULL MODEL
-    null = np.stack([X_r_concat.mean(axis=0)] * X_r_concat.shape[0])
-    l_null = eval_func(null, X_r_concat, mode="evaluate")
-    l_null = {k: v.sum() for k, v in split_into_regions(l_null, X_concat).items()}
-
     # Compute the reconstruction loss using the real reconstructions
     l_real = eval_func(X_r_reconstruction, X_r_concat, mode="evaluate")
     l_real = {k: v.sum() for k, v in split_into_regions(l_real, X_concat).items()}
 
     # Compute the relative reconstruction loss
     l_rel = {k: (l_real[k] - l_perf[k]) for k in l_real.keys()}
-
-    #### TESTING: NULL MODEL
-    # l_rel = {k: np.abs(l_real[k] - l_null[k]) for k in l_real.keys()}
 
     return l_rel
 

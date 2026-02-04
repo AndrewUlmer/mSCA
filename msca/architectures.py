@@ -370,10 +370,6 @@ class mSCA_architecture(nn.Module):
         # Apply the region-wise scaling parameter
         Z_r = {k: Z_r_shift[k] * region_scaling[:, i] for i, k in enumerate(Z_r.keys())}
 
-        #### TESTING: POST-HOC-SCALING
-        # if self.mode == "post-hoc-scaling":
-        #     Z_r = {k: v * self.C for k, v in Z_r.items()}
-
         # Reconstruct the input data
         X_reconstruction = self.decoder(Z_r)
 

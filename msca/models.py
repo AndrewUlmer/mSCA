@@ -100,6 +100,8 @@ class mSCA:
         batch_size: int = 64,
         cd_rate: float = 0.5,
         device: str = "cpu",
+        cd_mode: str = "both",
+        post_hoc_epoch: int = 1000,
     ):
         self.n_components = n_components
         self.n_epochs = n_epochs
@@ -114,9 +116,11 @@ class mSCA:
         self.batch_size = batch_size
         self.cd_rate = cd_rate
         self.device = device
+        self.cd_mode = cd_mode
+        self.post_hoc_epoch = post_hoc_epoch
 
     def fit(
-        self, X: dict[str, list[np.ndarray]]
+        self, X: dict[str, list[np.ndarray]], load: bool = False
     ) -> tuple[object, dict[str, np.ndarray]]:
         #### POST-HOC SCALING
         from msca.evaluations import bootstrap_performances
@@ -190,7 +194,9 @@ class mSCA:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
         # Make coordinated dropout object
-        self.cd = CoordinatedDropout(self.n_components, self.cd_rate, self.filter_len)
+        self.cd = CoordinatedDropout(
+            self.n_components, self.cd_rate, self.filter_len, mode=self.cd_mode
+        )
 
         # Used for truncating trials
         self.trunc = slice(self.filter_len - 1, -self.filter_len + 1)
@@ -207,63 +213,53 @@ class mSCA:
             "orthogonality": [],
         }
 
-        # Iterate through training loop
-        for epoch in tqdm(range(self.n_epochs)):
+        if not load:
+            # Iterate through training loop
+            for epoch in tqdm(range(self.n_epochs)):
 
-            ### TESTING POST-HOC SCALING
-            if epoch < self.n_epochs - 1000:
+                ### TESTING POST-HOC SCALING DURING LAST 1K EPOCHS
+                if epoch < self.n_epochs - self.post_hoc_epoch:
+                    # Training step
+                    self.criterion = train_criterion
+                    _, _, loss_dict = self.loop(data_loader, mode="train")
 
-                # Training step
-                self.criterion = train_criterion
-                _, _, loss_dict = self.loop(data_loader, mode="train")
+                elif epoch == self.n_epochs - self.post_hoc_epoch:
+                    # Freeze all model weights
+                    for param in self.model.parameters():
+                        param.requires_grad = False
 
-            elif epoch == self.n_epochs - 1000:
-                pre_scale_perf = bootstrap_performances(self, X)
-                torch.save(
-                    pre_scale_perf,
-                    f"./experiments/simulation/sparsity_sweep_decoder_post_hoc/pre_{self.pre_lam_sparse:.4f}.pt",
-                )
+                    # Switch mSCA's decoder
+                    pre_decoder_w = self.model.decoder.model.weight.data
+                    pre_decoder_b = self.model.decoder.model.bias
 
-                # Freeze all model weights
-                for param in self.model.parameters():
-                    param.requires_grad = False
+                    # Set new decoder
+                    new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
+                    new_decoder.weight.data = pre_decoder_w
+                    new_decoder.bias.data = pre_decoder_b
+                    self.model.decoder.model = new_decoder
 
-                # Switch mSCA's decoder
-                pre_decoder_w = self.model.decoder.model.weight.data
-                pre_decoder_b = self.model.decoder.model.bias
+                    # Add to optimizer
+                    self.optimizer_post_hoc = torch.optim.Adam(
+                        [{"params": self.model.decoder.model.parameters(), "lr": 1e-3}]
+                    )
 
-                # Set new decoder
-                new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
-                new_decoder.weight.data = pre_decoder_w
-                new_decoder.bias.data = pre_decoder_b
-                self.model.decoder.model = new_decoder
+                else:
+                    self.model.mode = "post-hoc-scaling"
+                    _, _, loss_dict = self.loop(data_loader, mode="post-hoc-scaling")
 
-                # Add to optimizer
-                self.optimizer_post_hoc = torch.optim.Adam(
-                    [{"params": self.model.decoder.model.parameters(), "lr": 1e-3}]
-                )
+                # Store training loss
+                train_loss_dicts["reconstruction"].append(loss_dict["reconstruction"])
+                train_loss_dicts["latent_sparsity"].append(loss_dict["latent_sparsity"])
+                train_loss_dicts["region_sparsity"].append(loss_dict["region_sparsity"])
+                train_loss_dicts["orthogonality"].append(loss_dict["orthogonality"])
 
-            else:
-                self.model.mode = "post-hoc-scaling"
-                _, _, loss_dict = self.loop(data_loader, mode="post-hoc-scaling")
+            # Concatenate training losses over all epochs
+            train_loss_dicts = {k: np.array(v) for k, v in train_loss_dicts.items()}
 
-            # Store training loss
-            train_loss_dicts["reconstruction"].append(loss_dict["reconstruction"])
-            train_loss_dicts["latent_sparsity"].append(loss_dict["latent_sparsity"])
-            train_loss_dicts["region_sparsity"].append(loss_dict["region_sparsity"])
-            train_loss_dicts["orthogonality"].append(loss_dict["orthogonality"])
+            return self, train_loss_dicts
 
-        # Concatenate training losses over all epochs
-        train_loss_dicts = {k: np.array(v) for k, v in train_loss_dicts.items()}
-
-        #### TESTING: POST-HOC SCALING
-        post_scale_perf = bootstrap_performances(self, X)
-        torch.save(
-            post_scale_perf,
-            f"./experiments/simulation/sparsity_sweep_decoder_post_hoc/post_{self.pre_lam_sparse:.4f}.pt",
-        )
-
-        return self, None  # train_loss_dicts
+        else:
+            return self, None
 
     def loop(
         self, data_loader: torch.utils.data.DataLoader, mode: str = "train"
@@ -325,17 +321,20 @@ class mSCA:
             #### TESTING POST-HOC SCALING
             elif mode == "post-hoc-scaling":
                 r_loss_f = eval(self.loss_func.lower() + "_f")
-                r_loss = sum(
-                    reconstruction_loss(
-                        X_reconstruction_masked,
-                        truncate(X_output_masked, self.trunc),
-                        r_loss_f,
-                        mode="train",
-                    )
+                r_loss = reconstruction_loss(
+                    X_reconstruction_masked,
+                    truncate(X_output_masked, self.trunc),
+                    r_loss_f,
+                    mode="train",
                 )
+                r_loss = sum(
+                    [r_loss[i] * v for i, v in enumerate(self.region_weights.values())]
+                )
+
                 r_loss.backward()
                 self.optimizer_post_hoc.step()
                 self.optimizer_post_hoc.zero_grad(set_to_none=True)
+                epoch_loss_dict["reconstruction"] += r_loss.item()
 
             # Accumulate loss
             if mode == "train":
@@ -345,7 +344,7 @@ class mSCA:
                 epoch_loss_dict["orthogonality"] += loss_dict["orthogonality"]
 
             # Store latents
-            elif mode == "evaluate":
+            if mode == "evaluate":
                 # Mask the post-convolution latents for visualization
                 Z_r_masked = self.cd.mask(Z_r, truncate(Z_r_mask, self.trunc))
 
@@ -430,7 +429,7 @@ class mSCA:
         """
         torch.save(self.model.state_dict(), f)
 
-    def load(self, f: str):
+    def load(self, f: str, X: dict):
         """
         Method for loading trained model weights in mSCA
 
@@ -438,5 +437,20 @@ class mSCA:
         ----------
         f : str
             Path to load weights from
+        X : dict
+            Described above
         """
+        self.n_epochs = 1
+        self.fit(X, load=True)
+
+        # Switch mSCA's decoder
+        pre_decoder_w = self.model.decoder.model.weight.data
+        pre_decoder_b = self.model.decoder.model.bias
+
+        # Set new decoder
+        new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
+        new_decoder.weight.data = pre_decoder_w
+        new_decoder.bias.data = pre_decoder_b
+        self.model.decoder.model = new_decoder
+
         self.model.load_state_dict(torch.load(f))
