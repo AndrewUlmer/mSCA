@@ -297,7 +297,7 @@ class mSCA_architecture(nn.Module):
             loss_func,
         )
         self.decoder_scaling = nn.Parameter(
-            torch.ones(self.n_components, len(region_sizes))
+            torch.ones(self.n_components, len(region_sizes)) * 2
         )
 
         # Initialize the convolutional filters
@@ -360,8 +360,7 @@ class mSCA_architecture(nn.Module):
         # Convolve with region-specific filters
         Z_r_shift = self.filters(Z_r_shift, mode="decode")
 
-        # Softshrink to allow thresholding of latents for each region
-        # region_scaling = F.softshrink(self.decoder_scaling)
+        # tanhshrink to allow thresholding of latents for each region
         region_scaling = F.tanhshrink(self.decoder_scaling)
 
         # Clamp region scalars between -1 and 1
