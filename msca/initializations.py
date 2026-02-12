@@ -54,13 +54,6 @@ def _pca_reconstruction(
     if loss_func == "Poisson":
         X_reconstruction = np.maximum(X_reconstruction, 0)
 
-    #### TESTING: USE POISSON GLM INSTEAD OF PCA + RELU
-
-    # concatenate X_orig
-    # x_orig_cat = np.concatenate([v for v in X_orig.values()], axis=1)
-    # glm = PoissonRegressorWrapper(alpha=0.001).fit(Z, x_orig_cat)
-    # X_reconstruction = glm.predict(Z)
-
     # Partitions back into regions
     X_reconstruction = split_into_regions(X_reconstruction, X)
 
@@ -180,7 +173,7 @@ def _compute_lam_sparse(
 
     # If the user has not manually passed a sparsity value to use
     if pct is None:
-        pct = 0.1 if loss_func == "Gaussian" else 0.05
+        pct = 1.0 if loss_func == "Gaussian" else 0.025
 
     # Make lambda sparse such that L1 is pct% of reconstruction
     return sum(relative_reconstruction_loss.values()) * pct / L_sparse
@@ -272,8 +265,8 @@ def _compute_lam_region(
     # If the user has not manually passed a region-sparsity value use defaults
     if pct is None:
         # TODO: determine if we want this to be defaulted or nah
-        pct = 0.1 if loss_func == "Gaussian" else 0.01
-        # pct = 0.0
+        # pct = 0.1 if loss_func == "Gaussian" else 0.01
+        pct = 0.0
 
     # Compute the region-sparsity penalty
     return sum(relative_reconstruction_loss.values()) * pct / L_region
@@ -316,7 +309,7 @@ def _initialize(
         X_smoothed_concat,
         n_components=n_components,
         loss_func=loss_func,
-        X_orig=X_concat,  ### TESTING POISSON GLM
+        X_orig=X_concat,
     )
 
     # Compute the relative reconstruction loss

@@ -3,7 +3,7 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
-
+from sklearn.metrics import r2_score
 from sklearn.linear_model import PoissonRegressor
 from sklearn.multioutput import MultiOutputRegressor
 
@@ -12,38 +12,182 @@ from .loss_funcs import *
 from .models import *
 
 
-class PoissonRegressorWrapper:
-    def __init__(self, alpha):
-        self.alpha = alpha
-        return
+def sparsity_sweep_bootstrap(
+    n_components: int, n_epochs: int, loss_func: str, X: dict, path: str
+):
+    """
+    This performs a sweep over the sparsity hyperparameter and
+    saves the results to a folder specified in path
 
-    def fit(self, Z, X):
-        regressor = PoissonRegressor(alpha=self.alpha, solver="newton-cholesky")
-        self.model = MultiOutputRegressor(regressor)
-        self.model.fit(Z, X)
-        return self
+    Parameters
+    ----------
+    n_components : int
+        Number of latent factors to use for each fit
+    n_epochs : int
+        Number of epochs to fit each model with
+    loss_func : str
+        Either "Gaussian" or "Poisson - the loss function used
+        to train mSCA
+    X : dict
+        Dictionary of neural acitivity described in quickstary.ipynb
+    path : str
+        This is the path you want to save your trained models to.
+    """
+    print(f"Performing sparsity sweep 🧹 --> saving results to {path}")
+    performances = {}
 
-    def predict(self, Z):
-        return self.model.predict(Z)
+    # Use different ranges for different loss functions
+    if loss_func == "Gaussian":
+        sparsity_range = np.array([0.0, 0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0])
+    elif loss_func == "Poisson":
+        sparsity_range = np.array([0.0, 0.001, 0.01, 0.025, 0.05, 0.075, 0.1, 0.5, 1.0])
+
+    for sparsity in sparsity_range:
+        # Correcting weird np to python conversion
+        sparsity = float(f"{sparsity:0.3f}")
+
+        # Instantiate mSCA with desired sparsity level
+        msca = mSCA(
+            n_components=n_components,
+            n_epochs=n_epochs,
+            loss_func=loss_func,
+            lam_sparse=sparsity,
+        )
+        msca, losses = msca.fit(X)
+
+        # Perform bootstrap validation
+        bootstrapped_losses = bootstrap_performances(msca, X)
+
+        # Store the performances
+        performances[sparsity] = bootstrapped_losses
+
+        # Save the bootstrapped model performance
+        torch.save(
+            bootstrapped_losses,
+            f"{path}/bootstrapped_sparsity={sparsity:.4f}.pt",
+        )
+
+        # Save the model so we can retrieve the best model later
+        msca.save(f"{path}/msca_sparsity={sparsity:.4f}.pt")
+
+        # Save the losses (for checking convergence)
+        torch.save(losses, f"{path}/losses_sparsity={sparsity:.4f}.pt")
+
+    return performances
 
 
-def pseudo_r2(predictions, X_target, mean_fr):
+@torch.no_grad()
+def bootstrap_performances(
+    msca: object, X: dict[str, np.ndarray], num_bootstraps: int = 1000
+) -> dict[int, np.ndarray]:
+    """
+    This reconstructs the neural activity randomly ablating neurons and
+    time-points to induce a distribution over loss values.
+    It uses mSCA's learned decoder matrix
+
+    Parameters
+    ----------
+    msca : mSCA object
+        A trained instantiation of mSCA
+    X : dict[str, np.ndarray]
+        Format described in quickstart.ipynb
+    num_bootstraps : int
+        Number of bootstraps to perform
+    """
+    # Set the criterion for evaluation
+    criterion = eval(f"{msca.loss_func}_f".lower())
+
+    # Convert X into a data_loader
+    data_loader, _ = convert_to_dataloader(X)
+
+    # Repeat for num_bootstraps
+    bootstrapped_r2s = []
+    for _ in tqdm(range(num_bootstraps)):
+
+        # Used for storing reconstructions
+        full_reconstruction = {k: [] for k in X.keys()}
+
+        # Used for storing truncated inputs
+        full_x_target = {k: [] for k in X.keys()}
+
+        # Now iterate through trials in the data_loader
+        for _, (X_target, trial_length) in enumerate(data_loader):
+            # Apply the mask to the inputs and outputs
+            X_input_masked, _, _, _, _ = msca.cd.forward(
+                X_target,
+                trial_length,
+            )
+            # Perform a forward pass through the model
+            _, _, X_reconstruction = msca.model(X_input_masked)
+
+            # Remove the padding from the reconstruction
+            for k, v in X_reconstruction.items():
+                for i, t in enumerate(trial_length):
+                    X_reconstruction[k][i, (t - msca.filter_len) :] = 0
+
+            # Add to full reconstructuion
+            [full_reconstruction[k].append(X_reconstruction[k]) for k in X.keys()]
+            [full_x_target[k].append(X_target[k][:, msca.trunc]) for k in X.keys()]
+
+        # Concatenate reconstruction and masked target across batches
+        full_reconstruction = {
+            k: torch.cat(v, axis=0) for k, v in full_reconstruction.items()
+        }
+        full_x_target = {k: torch.cat(v, axis=0) for k, v in full_x_target.items()}
+
+        # Concatenate recnonstruction and target across regions
+        full_reconstruction = torch.cat(
+            [v for v in full_reconstruction.values()], axis=2
+        )  # type: ignore
+        full_x_target = torch.cat([v for v in full_x_target.values()], axis=2)  # type: ignore
+
+        # Compute the resulting r2 score, using normal r2 for Gaussian, pseudo-r2 for Poisson
+        if msca.loss_func == "Gaussian":
+            r2s = r2_score(full_x_target.flatten(), full_reconstruction.flatten())
+        elif msca.loss_func == "Poisson":
+            # Compute the "null model"
+            mean_fr = full_x_target.mean(axis=(0, 1))
+
+            # Collapse the batch (trial) dimension
+            full_x_target = full_x_target.reshape(-1, full_x_target.shape[-1])
+            full_reconstruction = full_reconstruction.reshape(
+                -1, full_reconstruction.shape[-1]
+            )
+
+            # Compute pseudo r2
+            r2s = pseudo_r2(full_x_target, full_reconstruction, mean_fr)
+
+        bootstrapped_r2s.append(r2s)
+
+    return np.array(bootstrapped_r2s)
+
+
+def pseudo_r2(
+    X_target: torch.Tensor, predictions: torch.Tensor, mean_fr: torch.Tensor
+) -> float:
+    """
+    This function will compute the pseudo r2 using the NLL from the Poisson
+    distribution
+
+    Parameters
+    ----------
+    X_target : torch.Tensor
+        The neural activity being reconstructed, concatenated across time and regions
+    predictions : torch.Tensor
+        The predictions made by mSCA's decoder, again concatenated across time and regions
+    mean_fr : torch.Tensor
+        The mean firing-rate of each neuron computed across all trials. Used to compute
+        the negative log-likelihood for the null model
+
+    """
     # Compute log-likelihood for saturated model
-    # sat_ll = sum(reconstruction_loss(X_target, X_target, poisson_f, mode="train"))
-    sat_ll = torch.cat(
-        reconstruction_loss(X_target, X_target, poisson_f, mode="evaluate"), axis=1
-    )
+    sat_ll = poisson_f(X_target, X_target)
 
-    # null_ll = sum(reconstruction_loss(mean_fr, X_target, poisson_f, mode="train"))
-    null_ll = torch.cat(
-        reconstruction_loss(mean_fr, X_target, poisson_f, mode="evaluate"), axis=1
-    )
+    # Compute the null log-likelihood
+    null_ll = poisson_f(mean_fr, X_target)
 
     # Compute the actual log-likelihood
-    # ll = sum(reconstruction_loss(predictions, X_target, poisson_f, mode="train"))
-    ll = torch.cat(
-        reconstruction_loss(predictions, X_target, poisson_f, mode="evaluate"), axis=1
-    )
+    ll = poisson_f(predictions, X_target)
 
     # Compute the pseudo-r2 - note these are NLLs
     D_model = ll.sum() - sat_ll.sum()
@@ -53,11 +197,104 @@ def pseudo_r2(predictions, X_target, mean_fr):
     return r2
 
 
+@torch.no_grad()
+def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
+    """
+    This is used to evaluate a bi-cross-validation fold, when actually
+    holding out neurons
+
+    Parameters
+    ----------
+    msca : object
+        A trained instantiation of mSCA
+    X_train : dict
+        A dictionary containing neural activity used in the training set. Should
+        be the same format as described in quickstart.ipynb
+    X_val : dict
+        A dictionary containing the neural activity used in the validation set.
+    n_splits : int
+        Number of splits to use across time.
+    """
+    # Compute the latents on all the training neurons
+    Z = msca.transform(X_train)
+
+    # Store variable for timepoints
+    T = np.arange(len(Z[list(Z.keys())[0]]))
+
+    # Initialize the KFold object across trials
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+
+    criterion = eval(f"{msca.loss_func}_f".lower())
+
+    # Iterate over the folds
+    performances_all = []  # {k: [] for k in X_train.keys()}
+    for train_index, test_index in kf.split(T):
+
+        X_val_concat = {
+            k: np.concatenate([x[msca.trunc] for x in v], axis=0)
+            for k, v in X_val.items()
+        }
+
+        # Grab the latents on training trials
+        Z_concat_train = {
+            k: np.concatenate([v[i] for i in train_index], axis=0) for k, v in Z.items()
+        }
+
+        # Grab the latents on testing trials
+        Z_concat_test = {
+            k: np.concatenate([v[i] for i in test_index], axis=0) for k, v in Z.items()
+        }
+
+        # Grab the validation neurons on training trials
+        X_val_concat_train = {
+            k: np.concatenate([v[i][msca.trunc] for i in train_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        # Grab the validation neuron on testing trials
+        X_val_concat_test = {
+            k: np.concatenate([v[i][msca.trunc] for i in test_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        predictions, X_test_heldout = [], []
+        for k in Z_concat_train.keys():
+            # Grab the latents on the training/testing time points
+            Z_train = Z_concat_train[k]
+            Z_test = Z_concat_test[k]
+
+            # # Grab the held-out neurons on the training/testing time points
+            X_train_heldout = X_val_concat_train[k]
+            X_test_heldout_r = X_val_concat_test[k]
+
+            # Fit a linear regression model to map from training latents to held-out neurons
+            lr = LinearRegression()
+            lr.fit(Z_train, X_train_heldout)
+
+            # Predict held-out neurons on held-out time-points
+            predictions_r = lr.predict(Z_test)
+
+            if msca.loss_func == "Poisson":
+                predictions = np.maximum(predictions_r, 0)
+
+            predictions.append(predictions_r)
+            X_test_heldout.append(X_test_heldout_r)
+
+        predictions = np.concatenate(predictions, axis=1)
+        X_test_heldout = np.concatenate(X_test_heldout, axis=1)
+        loss = r2_score(X_test_heldout, predictions)
+        performances_all.append(loss)
+
+    return performances_all
+
+
 def mean_confidence_interval(data: np.ndarray, confidence: float = 0.95):
     """
     Simply computes a one-sides confidence interval based on the bootstrap results
     from bootstrap_delays_decoder
 
+    Parameters
+    ----------
     data : np.ndarray
         The bootstraps
     confidence : float
@@ -76,6 +313,8 @@ def refine_delays(
     This removes those time-delays which do not meaningfully improve the reconstruction
     performance of the model.
 
+    Parameters
+    ----------
     msca : object
         Trained mSCA object
     bootstrapped_delay_effects : dict[int, np.ndarray]
@@ -122,6 +361,9 @@ def bootstrap_delays_decoder(
     num_bootstraps : int
         Number of bootstraps to perform
     """
+    # Set the cd_rate
+    msca.cd.cd_rate = 0.5
+
     # Set the criterion for evaluation
     criterion = eval(f"{msca.loss_func}_f".lower())
 
@@ -177,7 +419,7 @@ def bootstrap_delays_decoder(
                 )
 
                 # Compute the reconstruction loss without the time-delay
-                without_delay = sum(
+                without_delay += sum(
                     reconstruction_loss(
                         X_reconstruction_without_delay_masked,
                         truncate(X_output_masked, msca.trunc),
@@ -194,72 +436,43 @@ def bootstrap_delays_decoder(
 
         performances[i] = np.array(diffs)
 
+    ### TESTING: ADDING CODE FOR DELETING DELAYS FOR REGION-SPECIFIC DIMENSIONS
+
+    # Compute the latents
+    Z = msca.transform(X)
+
+    # Compute their magnitudes
+    magnitudes = np.stack(
+        [np.linalg.norm(np.concatenate(v), axis=0) for v in Z.values()]
+    )
+
+    # If one dimension's magnitude is 90% of the totaly magnitude, zero-out delays for other dims
+    region_specific = ((magnitudes / magnitudes.sum(axis=0)) > 0.9).sum(axis=0)
+    for k, v in performances.items():
+        if region_specific[k]:
+            performances[k] = np.zeros_like(v)
+
+    ##### END TESTING
+
     return performances
 
 
-@torch.no_grad()
-def bootstrap_performances(
-    msca: object, X: dict[str, np.ndarray], num_bootstraps: int = 1000
-) -> dict[int, np.ndarray]:
-    """
-    This reconstructs the neural activity randomly ablating neurons and
-    time-points to induce a distribution over loss values. It uses linear
-    regression instead of the learned decoder matrix.
+##### START CODE STILL IN DEVELOPMENT / OLD CODE #####
 
-    Parameters
-    ----------
-    msca : mSCA object
-        A trained instantiation of mSCA
-    X : dict[str, np.ndarray]
-        Format described in quickstart.ipynb
-    num_bootstraps : int
-        Number of bootstraps to perform
-    """
-    # Set the criterion for evaluation
-    criterion = eval(f"{msca.loss_func}_f".lower())
 
-    # Convert X into a data_loader
-    data_loader, _ = convert_to_dataloader(X)
+class PoissonRegressorWrapper:
+    def __init__(self, alpha):
+        self.alpha = alpha
+        return
 
-    # Repeat for num_bootstraps
-    bootstrapped_losses = []
-    for _ in tqdm(range(num_bootstraps)):
-        # Now iterate through trials in the data_loader
-        loss = 0
-        for _, (X_target, trial_length) in enumerate(data_loader):
-            # Apply the mask to the inputs and outputs
-            X_input_masked, X_output_masked, output_mask, Z_mask, Z_r_mask = (
-                msca.cd.forward(
-                    X_target,
-                    trial_length,
-                )
-            )
-            # Perform a forward pass through the model
-            _, _, X_reconstruction = msca.model(X_input_masked)
+    def fit(self, Z, X):
+        regressor = PoissonRegressor(alpha=self.alpha, solver="newton-cholesky")
+        self.model = MultiOutputRegressor(regressor)
+        self.model.fit(Z, X)
+        return self
 
-            # Mask the reconstruction
-            X_reconstruction_masked = msca.cd.mask(
-                X_reconstruction, truncate(output_mask, msca.trunc)
-            )
-
-            # Mask the inputs + compute the reconstruction loss
-            loss += sum(
-                reconstruction_loss(
-                    X_reconstruction_masked,
-                    truncate(X_output_masked, msca.trunc),
-                    criterion,
-                    mode="train",
-                )
-            )
-
-            # loss += pseudo_r2(
-            #     X_reconstruction, {k: v[:, msca.trunc] for k, v in X_target.items()}
-            # )
-
-        # Compute the percent difference in the loss with/without the delay
-        bootstrapped_losses.append(loss)
-
-    return np.array(bootstrapped_losses)
+    def predict(self, Z):
+        return self.model.predict(Z)
 
 
 @torch.no_grad()
@@ -472,64 +685,6 @@ def bootstrap_performances_separate_regressor(
         bootstrapped_losses.append(loss)
 
     return np.array(bootstrapped_losses)
-
-
-def sparsity_sweep_bootstrap(
-    n_components: int, n_epochs: int, loss_func: str, X: dict, path: str
-):
-    """
-    This performs a sweep over the sparsity hyperparameter and
-    saves the results to a folder specified in path
-    """
-    print(f"Performing sparsity sweep 🧹 --> saving results to {path}")
-    performances = {}
-
-    # Use different ranges for different loss functions
-    if loss_func == "Gaussian":
-        sparsity_range = np.concatenate(
-            [np.array([0.0]), np.array([0.001, 0.01]), np.arange(0.05, 1.05, 0.05)]
-        )
-    elif loss_func == "Poisson":
-        sparsity_range = np.concatenate(
-            [
-                np.array([0.0]),
-                np.array([0.001]),
-                np.arange(0.01, 0.1005, 0.005),
-            ]
-        )
-
-    for sparsity in sparsity_range:
-        # Correcting weird np to python conversion
-        sparsity = float(f"{sparsity:0.3f}")
-
-        # Instantiate mSCA with desired sparsity level
-        msca = mSCA(
-            n_components=n_components,
-            n_epochs=n_epochs,
-            loss_func=loss_func,
-            lam_sparse=sparsity,
-        )
-        msca, losses = msca.fit(X)
-
-        # Perform bootstrap validation
-        # bootstrapped_losses = bootstrap_performances(msca, X)
-
-        # Store the performances
-        # performances[sparsity] = bootstrapped_losses
-
-        # # Save the losses to confirm the model converged
-        # torch.save(
-        #     bootstrapped_losses,
-        #     f"{path}/bootstrapped_sparsity={sparsity.item():.2f}.pt",
-        # )
-
-        # # Save the model so we can retrieve the best model later
-        # msca.save(f"{path}/msca_sparsity={sparsity.item():.2f}.pt")
-
-        # # Save the losses (for checking convergence)
-        # torch.save(losses, f"{path}/losses_sparsity={sparsity.item():.2f}.pt")
-
-    return performances
 
 
 def sparsity_sweep_bootstrap_evaluation(

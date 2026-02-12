@@ -92,11 +92,13 @@ if __name__ == "__main__":
         cd_mode="both",
     ).fit(X)
 
-    print("something")
+    msca.save("./msca_cycling.pt")
+
+    # print("something")
 
     # Let's try sweeping over sparsity with
     # performances = sparsity_sweep_bootstrap(40, 5000, "Gaussian", X, "./")
 
     # performance = bootstrap_performances_separate_regressor(msca, X, num_bootstraps=100)
 
-    print("something")
+    # print("something")

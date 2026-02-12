@@ -80,9 +80,9 @@ class Encoder(nn.Module):
                 self.model[region] = torch.nn.Sequential(
                     nn.Linear(weights.shape[1], weights.shape[1]),
                     nn.Tanhshrink(),
-                    nn.Linear(weights.shape[1], weights.shape[0]),
+                    nn.Linear(weights.shape[1], weights.shape[1]),
                     nn.Tanhshrink(),
-                    nn.Linear(weights.shape[0], weights.shape[0]),
+                    nn.Linear(weights.shape[1], weights.shape[0]),
                 )
 
                 # Use identity to get close to PCA equivalence
@@ -90,13 +90,18 @@ class Encoder(nn.Module):
                     weights.shape[1]
                 )
 
+                ### TESTING
+                self.model[region][2].weight.data = torch.eye(  # type:ignore
+                    weights.shape[1]
+                )
+
                 # Initialize dimensionality reduction portion with PCA loadings
-                self.model[region][2].weight.data = torch.tensor(  # type: ignore
+                self.model[region][4].weight.data = torch.tensor(  # type: ignore
                     weights, dtype=torch.float32
                 )
 
                 # Initialize linear part using eye-dentity
-                self.model[region][4].weight.data = torch.eye(weights.shape[0])  # type: ignore
+                # self.model[region][4].weight.data = torch.eye(weights.shape[0])  # type: ignore
 
     def forward(self, X: dict) -> dict[str, torch.Tensor]:
         """
@@ -279,9 +284,6 @@ class mSCA_architecture(nn.Module):
         self.linear = linear
         self.loss_func = loss_func
 
-        #### TESTING POST-HOC SCALING
-        self.mode = "train"
-
         # Initialize the encoder
         self.encoder = Encoder(init_encoder, self.linear)
         self.encoder_scaling = nn.Parameter(
@@ -297,16 +299,13 @@ class mSCA_architecture(nn.Module):
             loss_func,
         )
         self.decoder_scaling = nn.Parameter(
-            torch.ones(self.n_components, len(region_sizes)) * 2
+            torch.ones(self.n_components, len(region_sizes)) * 2.0
         )
 
         # Initialize the convolutional filters
         self.filters = ConvolutionalFilters(
             self.n_components, len(self.region_sizes), filter_length, max_smoothing
         )
-
-        # TESTING: POST-HOC SCALING
-        self.C = nn.Parameter(torch.ones(self.n_components))
 
     def forward(self, X: dict) -> tuple[
         torch.Tensor,  # latent combined across regions
@@ -362,6 +361,7 @@ class mSCA_architecture(nn.Module):
 
         # tanhshrink to allow thresholding of latents for each region
         region_scaling = F.tanhshrink(self.decoder_scaling)
+        # region_scaling = F.softshrink(self.decoder_scaling)
 
         # Clamp region scalars between -1 and 1
         region_scaling = torch.clamp(region_scaling, min=-1.0, max=1.0)

@@ -92,7 +92,10 @@ def poisson_f(
 
 
 def reconstruction_loss(
-    X_inp: dict, X_tgt: dict, eval_func: Callable, mode: Union[str, None] = None
+    X_inp: dict[str, torch.Tensor],
+    X_tgt: dict[str, torch.Tensor],
+    eval_func: Callable,
+    mode: Union[str, None] = None,
 ) -> list[torch.Tensor]:
     """
     Computes the reconstruction loss of the PCA
@@ -201,7 +204,8 @@ def gaussian_loss(
     l1 = torch.sum(torch.abs(z))
 
     # Compute the group-sparsity loss
-    gs = region_sparsity_loss(z, F.softshrink(scaling))
+    gs = region_sparsity_loss(z, F.tanhshrink(scaling))
+    # gs = region_sparsity_loss(z, F.softshrink(scaling))
 
     # Compute the orthogonality loss
     orth = torch.norm(V.T @ V - torch.eye(V.shape[1], device=V.device)) ** 2
