@@ -79,9 +79,9 @@ class Encoder(nn.Module):
                 # for other nonlinearities if not concerned with sparsity
                 self.model[region] = torch.nn.Sequential(
                     nn.Linear(weights.shape[1], weights.shape[1]),
-                    nn.ReLU(),
+                    nn.Tanhshrink(),
                     nn.Linear(weights.shape[1], weights.shape[1]),
-                    nn.ReLU(),
+                    nn.Tanhshrink(),
                     nn.Linear(weights.shape[1], weights.shape[0]),
                 )
 
