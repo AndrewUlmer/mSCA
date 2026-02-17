@@ -13,6 +13,9 @@ from .utils import *
 
 # from msca.evaluations import bootstrap_performances
 
+r_grads = []
+l1_grads = []
+
 
 def convert_to_dataloader(X, batch_size=64, shuffle=True):
     """
@@ -295,6 +298,40 @@ class mSCA:
                     self.model.decoder.model.weight,
                     mode=mode,
                 )
+
+                ## TESTING: looking at gradient ratio
+                # loss_dict["reconstruction"].backward(retain_graph=True)
+                # r_grad = self.model.encoder.model["M1"].weight.grad.norm(p=2)
+
+                # r_grad_dec = (
+                #     self.model.decoder.model.parametrizations.weight.original.grad.norm(
+                #         p=2
+                #     )
+                # )
+
+                # r_grads.append(r_grad.item())
+                # self.optimizer.zero_grad(set_to_none=True)
+
+                # loss_dict["latent_sparsity"].backward(retain_graph=True)
+                # l1_grad = self.model.encoder.model["M1"].weight.grad.norm(p=2)
+                # l1_grads.append(l1_grad.item())
+                # self.optimizer.zero_grad(set_to_none=True)
+
+                # k = r_grad / l1_grad
+                # loss_dict["latent_sparsity"] *= k
+
+                # loss_dict["orthogonality"].backward(retain_graph=True)
+                # orth_grad = (
+                #     self.model.decoder.model.parametrizations.weight.original.grad.norm(
+                #         p=2
+                #     )
+                # )
+                # k = (0.1 * r_grad_dec) / orth_grad
+                # loss_dict["orthogonality"] *= k
+
+                # loss = sum([v for v in loss_dict.values()])
+
+                ### END TESTING
 
                 # Backpropagation and optimizer step (if training)
                 loss.backward()

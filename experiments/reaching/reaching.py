@@ -15,7 +15,7 @@ X["PMd"] = [np.concatenate([x[:, :23], x[:, 23 + 1 :]], axis=1) for x in X["PMd"
 
 # Train mSCA
 msca, losses = mSCA(
-    n_components=20, loss_func="Poisson", n_epochs=6000, post_hoc_epoch=5
+    n_components=20, loss_func="Poisson", n_epochs=6000, post_hoc_epoch=5, filter_len=21
 ).fit(X)
 
 performances = bootstrap_delays_decoder(msca, X, num_bootstraps=100)

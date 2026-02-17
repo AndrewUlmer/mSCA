@@ -79,9 +79,9 @@ class Encoder(nn.Module):
                 # for other nonlinearities if not concerned with sparsity
                 self.model[region] = torch.nn.Sequential(
                     nn.Linear(weights.shape[1], weights.shape[1]),
-                    nn.Tanhshrink(),
+                    nn.ReLU(),
                     nn.Linear(weights.shape[1], weights.shape[1]),
-                    nn.Tanhshrink(),
+                    nn.ReLU(),
                     nn.Linear(weights.shape[1], weights.shape[0]),
                 )
 
@@ -99,9 +99,6 @@ class Encoder(nn.Module):
                 self.model[region][4].weight.data = torch.tensor(  # type: ignore
                     weights, dtype=torch.float32
                 )
-
-                # Initialize linear part using eye-dentity
-                # self.model[region][4].weight.data = torch.eye(weights.shape[0])  # type: ignore
 
     def forward(self, X: dict) -> dict[str, torch.Tensor]:
         """

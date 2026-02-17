@@ -214,9 +214,9 @@ def gaussian_loss(
         rc + l1 * lam_sparse + gs * lam_region + lam_orthog * orth,
         {
             "reconstruction": rc.item(),  # type: ignore
-            "latent_sparsity": l1.item(),
-            "region_sparsity": gs.item(),
-            "orthogonality": orth.item(),
+            "latent_sparsity": l1.item() * lam_sparse,
+            "region_sparsity": gs.item() * lam_region,
+            "orthogonality": orth.item() * lam_orthog,
         },
     )
 
@@ -283,9 +283,9 @@ def poisson_loss(
     return (
         rc + l1 * lam_sparse + gs * lam_region + lam_orthog * orth,
         {
-            "reconstruction": rc.item(),  # type: ignore
-            "latent_sparsity": l1.item(),
-            "region_sparsity": gs.item(),
-            "orthogonality": orth.item(),
+            "reconstruction": rc,  # .item(),  # type: ignore
+            "latent_sparsity": l1,  # .item(),
+            "region_sparsity": gs * lam_region,  # .item(),
+            "orthogonality": orth,  # * lam_orthog,  # .item(),
         },
     )
