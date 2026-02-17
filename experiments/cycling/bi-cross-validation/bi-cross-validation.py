@@ -87,7 +87,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_components", type=int, required=True)
 
     # Set the experiment path
-    experiment_path = "./experiments/cycling/bi-cross-validation-sparsity-both/"
+    experiment_path = "./experiments/cycling/bi-cross-validation/"
     param_path = "params.txt"
 
     # Read the specific parameters from the text file
@@ -107,7 +107,7 @@ if __name__ == "__main__":
     )
 
     # Set the experiment path
-    experiment_path = "./experiments/cycling/bi-cross-validation-sparsity-both/"
+    experiment_path = "./experiments/cycling/bi-cross-validation/"
 
     # Preprocess the data
     m1_preprocessed = preprocess(

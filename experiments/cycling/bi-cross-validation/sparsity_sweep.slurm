@@ -7,10 +7,10 @@
 #SBATCH --ntasks-per-node=10	  # Total requested RAM will be 10 x 10 = 100G
 #SBATCH --mem-per-cpu=10G         # Adjust as needed
 #SBATCH --time=4:00:00            # Time required to run
-#SBATCH --array=1-28               # Array range must match lines in params.txt
+#SBATCH --array=1-14               # Array range must match lines in params.txt
 
 # Get the specific parameters for this array task
-PARAMS=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ./experiments/cycling/bi-cross-validation-sparsity-both/params.txt)
+PARAMS=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ./experiments/cycling/bi-cross-validation/params.txt)
 
 echo "Running job ${SLURM_ARRAY_TASK_ID} with params: $PARAMS"
 
@@ -19,4 +19,4 @@ source activate
 conda activate mSCA
 
 # Run your script
-python ./experiments/cycling/bi-cross-validation-sparsity-both/bi-cross-validation.py $PARAMS
+python ./experiments/cycling/bi-cross-validation/bi-cross-validation.py $PARAMS
