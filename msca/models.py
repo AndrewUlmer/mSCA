@@ -182,7 +182,7 @@ class mSCA:
             loss_func=self.loss_func,
         )
 
-        # Convert input data to dataloader TODO: remove non-shuffling (for testing purposes)
+        # Convert input data to dataloader
         data_loader, _ = convert_to_dataloader(
             X, batch_size=self.batch_size, shuffle=True
         )
@@ -211,12 +211,20 @@ class mSCA:
             "total_loss": [],
         }
 
+        #### TESTING GRADIENT BALANCING
+        balance_interval = 10
+
         if not load:
             # Iterate through training loop
             for epoch in tqdm(range(self.n_epochs)):
 
                 # Model will start post-hoc training at (self.n_epochs - self.post_hoc_epoch)
-                if epoch < self.n_epochs - self.post_hoc_epoch:
+                if epoch < (self.n_epochs - self.post_hoc_epoch):
+                    # If using gradient balancing for sparsity
+                    if (epoch % balance_interval == 0) and (balance_interval != np.inf):
+                        self.lam_sparse = self.loop(data_loader, mode="balance")
+                        print(f"New lam_sparse = {self.lam_sparse}")
+
                     # Training step
                     self.criterion = train_criterion
                     _, _, loss_dict = self.loop(data_loader, mode="train")
@@ -260,7 +268,8 @@ class mSCA:
         }
 
         # Set the reconstruction loss function if post-hoc training
-        if mode == "post-hoc-scaling":
+        if mode in ["post-hoc-scaling", "balance"]:
+            r_grads, l1_grads = [], []
             r_loss_f = eval(self.loss_func.lower() + "_f")
 
         # Iterate over trials in the data_loader
@@ -299,40 +308,6 @@ class mSCA:
                     mode=mode,
                 )
 
-                ## TESTING: looking at gradient ratio
-                # loss_dict["reconstruction"].backward(retain_graph=True)
-                # r_grad = self.model.encoder.model["M1"].weight.grad.norm(p=2)
-
-                # r_grad_dec = (
-                #     self.model.decoder.model.parametrizations.weight.original.grad.norm(
-                #         p=2
-                #     )
-                # )
-
-                # r_grads.append(r_grad.item())
-                # self.optimizer.zero_grad(set_to_none=True)
-
-                # loss_dict["latent_sparsity"].backward(retain_graph=True)
-                # l1_grad = self.model.encoder.model["M1"].weight.grad.norm(p=2)
-                # l1_grads.append(l1_grad.item())
-                # self.optimizer.zero_grad(set_to_none=True)
-
-                # k = r_grad / l1_grad
-                # loss_dict["latent_sparsity"] *= k
-
-                # loss_dict["orthogonality"].backward(retain_graph=True)
-                # orth_grad = (
-                #     self.model.decoder.model.parametrizations.weight.original.grad.norm(
-                #         p=2
-                #     )
-                # )
-                # k = (0.1 * r_grad_dec) / orth_grad
-                # loss_dict["orthogonality"] *= k
-
-                # loss = sum([v for v in loss_dict.values()])
-
-                ### END TESTING
-
                 # Backpropagation and optimizer step (if training)
                 loss.backward()
                 self.optimizer.step()
@@ -359,6 +334,35 @@ class mSCA:
                 # Store the reconstruction loss during the post-hoc period
                 epoch_loss_dict["reconstruction"] += r_loss.item()
 
+            elif mode == "balance":
+                # Compute the reconstruction loss
+                r_loss = reconstruction_loss(
+                    X_reconstruction_masked,  # type: ignore
+                    truncate(X_output_masked, self.trunc),
+                    r_loss_f,
+                    mode="train",
+                )
+                r_loss = sum(
+                    [r_loss[i] * v for i, v in enumerate(self.region_weights.values())]
+                )
+
+                # Compute the encoder gradient magnitudes
+                r_loss.backward(retain_graph=True)
+
+                # Retrieve grads
+                r_grad = self.model._retrieve_grads()
+                self.optimizer.zero_grad(set_to_none=True)
+
+                # Compute the sparsity loss
+                l1_loss = torch.sum(torch.abs(Z_masked))
+
+                # Compute the encoder gradient magnitudes
+                l1_loss.backward(retain_graph=True)
+                l1_grad = self.model._retrieve_grads()
+                self.optimizer.zero_grad(set_to_none=True)
+
+                r_grads.append(r_grad), l1_grads.append(l1_grad)
+
             # Accumulate loss
             if mode == "train":
                 epoch_loss_dict["reconstruction"] += loss_dict["reconstruction"]
@@ -381,7 +385,11 @@ class mSCA:
                     for k in self.region_names
                 ]
 
-        return latents, reconstructions, epoch_loss_dict
+        if mode != "balance":
+            return latents, reconstructions, epoch_loss_dict
+        else:
+            r_grads, l1_grads = torch.stack(r_grads), torch.stack(l1_grads)
+            return r_grads.mean() / l1_grads.mean()
 
     @torch.no_grad()
     def transform(

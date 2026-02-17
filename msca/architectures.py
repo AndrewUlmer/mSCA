@@ -304,6 +304,15 @@ class mSCA_architecture(nn.Module):
             self.n_components, len(self.region_sizes), filter_length, max_smoothing
         )
 
+    ### TESTING: USED TO RETURN GRADIENT MAGNITUDES IN ARCHITECTURE DEPENDENT WAY
+    def _retrieve_grads(self):
+        grads = []
+        for k in self.encoder.model.keys():
+            if self.linear:
+                grads.append(self.encoder.model[k].weight.grad)
+
+        return torch.cat(grads, axis=1).norm(p=2)
+
     def forward(self, X: dict) -> tuple[
         torch.Tensor,  # latent combined across regions
         dict[str, torch.Tensor],  # post-convolutional latents
