@@ -310,6 +310,8 @@ class mSCA_architecture(nn.Module):
         for k in self.encoder.model.keys():
             if self.linear:
                 grads.append(self.encoder.model[k].weight.grad)
+            else:
+                grads.append(self.encoder.model[k][4].weight.grad)
 
         return torch.cat(grads, axis=1).norm(p=2)
 
