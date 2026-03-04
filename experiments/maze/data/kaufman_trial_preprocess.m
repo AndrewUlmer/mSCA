@@ -68,8 +68,8 @@ for tr=1:num_trials %Loop through trials
         end_time= R(tr).moveEndsTime;
         move_time= R(tr).offlineMoveOnsetTime;
         
-        wdw_start=tgt_on_time-300; % -10
-        wdw_end=tgt_on_time+ceil((end_time-tgt_on_time)/dt)*dt;
+        wdw_start=tgt_on_time-600; % -10
+        wdw_end=tgt_on_time+ceil((end_time-tgt_on_time)/dt)*dt + 300;
 
        %% Get target information
         tgt_id=tr; %could also use trialID
@@ -101,7 +101,7 @@ for tr=1:num_trials %Loop through trials
 %             x_acc, y_acc, ts];
 %         target_id{total_idx}=tgt_id;
         target_time{total_idx}=tgt_on_time;
-        tgt_time_rel{total_idx}=300;
+        tgt_time_rel{total_idx}=600;
         go_time_rel{total_idx}=go_time-tgt_on_time;
         move_time_rel{total_idx}=move_time-tgt_on_time;
         vel{total_idx}=vels;
@@ -147,10 +147,10 @@ end
 
 %% Save
 
-save_folder='/Users/jig289/Dropbox/MATLAB/';
+save_folder=folder;
 % save_folder='/Users/jig289/Dropbox/MATLAB/Projects/In_Progress/Options_Coding/Miller/Data/Processed';
 
 
 % save([save_folder '/' monkey '_' fname '_py.mat' ],'neural_data_PMd','neural_data_M1','kinematics','target_id','target_time','go_time_rel','move_time_rel','move_time_before_end');
-save([save_folder '/kaufman_trial_py2_good_fewertr.mat' ],'neural_data','target_time','go_time_rel','move_time_rel','array_idx','vel','tgt_time_rel','condition');
+save([save_folder '/kaufman_trial_py2_good_fewertr_andrew.mat' ],'neural_data','target_time','go_time_rel','move_time_rel','array_idx','vel','tgt_time_rel','condition');
 

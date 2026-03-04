@@ -79,20 +79,28 @@ if __name__ == "__main__":
     # Put data into dictionary format
     X = {"M1": m1_preprocessed, "SMA": sma_preprocessed}
 
+    # X = {"M1": [X["M1"][i] for i in range(4)], "SMA": [X["SMA"][i] for i in range(4)]}
+
     # Now run mSCA
-    msca, losses = mSCA(
+    msca = mSCA(
         n_components=40,
         n_epochs=10000,
-        linear=True,
+        linear=False,
         loss_func="Gaussian",
-        lam_sparse=1.0,
-        lam_region=0.0,
-        post_hoc_epoch=1000,
+        lam_region=0.5,
+        post_hoc_epoch=-1,  # 1000,
         cd_rate=0.5,
         cd_mode="both",
-    ).fit(X)
+        filter_len=41,
+        init="unique",
+        lam_sparse=0.1,
+    ).fit(
+        X
+    )  # , load=True)
 
-    msca.save("./msca_cycling.pt")
+    msca.load("./msca-full-cousteau.pt", X)
+
+    print("something")
 
     # print("something")
 

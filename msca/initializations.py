@@ -4,40 +4,8 @@ from sklearn.decomposition import PCA
 from .utils import *
 from .loss_funcs import *
 
-# from msca.evaluations import PoissonRegressorWrapper
 
-
-def _pca_reconstruction(
-    X: dict, n_components: int, loss_func: str, X_orig: dict  #### TESTING POISSON GLM
-) -> tuple[np.ndarray, dict, dict, dict, dict]:
-    """
-    Computes the reconstruction of the neural activity using principal component analysis
-
-    Parameters
-    ----------
-    X : dict
-        Format described in quickstart.ipynb, but now all trials are concatenated into a np.ndarray
-        for each region
-    n_components : int
-        The number of latent factors used in PCA
-    loss_func : str
-        The loss function - need to make reconstructions >= 0 for spiking data
-
-    Returns
-    -------
-    Z : np.ndarray
-        latents computed using PCA
-    U : dict
-        PCA loadings to be used as mSCA's initial encoder
-    V : dict
-        PCA loadings to be used as mSCA's initial decoder
-    X_reconstruction : dict
-        Reconstruction from using PCA
-    b_enc_init : np.ndarray
-        Initial bias term to use in PCA's encoder
-    b_dec_init : dict
-        Initial bias term to use in PCA's decoder
-    """
+def _init_shared(X: dict, n_components: int, loss_func: str):
     # Concatenate X across regions
     X_r_concat = np.concatenate(list(X.values()), axis=1)
 
@@ -57,9 +25,121 @@ def _pca_reconstruction(
     # Partitions back into regions
     X_reconstruction = split_into_regions(X_reconstruction, X)
 
-    # Split U and V into region dicts
+    # Split U and get V
     U = split_into_regions(pca.components_, X)
     V = {k: u.T for k, u in U.items()}
+
+    return (
+        Z,
+        U,
+        V,
+        X_reconstruction,
+    )  # , b_dec_init
+
+
+def _init_unique(X: dict, n_components: int, loss_func: str):
+    # Grab the total number of neurons
+    N = sum([v.shape[1] for v in X.values()])
+
+    #### TESTING UNIQUE INITIALZIATION
+    U_cat, X_reconstruction, Z = [], [], []
+    col_counter_beg = 0
+    for i, (k, v) in enumerate(X.items()):
+        # Fit PCA to region data
+        pca_k = PCA(n_components=n_components // len(X)).fit(v)
+
+        # Make block sparse - evenly splitting number of latents across regions
+        row_counter_beg = i * n_components // len(X)
+        row_counter_end = (i + 1) * n_components // len(X)
+
+        # For iterating over neurons
+        col_counter_end = col_counter_beg + v.shape[1]
+
+        # For block-sparse matrix
+        container = np.zeros((n_components, N))
+        container[row_counter_beg:row_counter_end, col_counter_beg:col_counter_end] = (
+            pca_k.components_
+        )
+        col_counter_beg = col_counter_end
+
+        # Get the latent for this region
+        Z_k = pca_k.transform(v)
+        Z.append(Z_k)
+
+        # Get the reconstruction
+        X_reconstruction_k = pca_k.inverse_transform(Z_k)
+        X_reconstruction.append(X_reconstruction_k)
+
+        # Save the components for this region
+        U_cat.append(container)
+
+    # Concatenate across regions
+    Z = np.concatenate(Z, axis=1)
+    X_reconstruction = np.concatenate(X_reconstruction, axis=1)
+    U = sum(U_cat)
+
+    # Use ReLU to constrain reconstructions >= 0
+    if loss_func == "Poisson":
+        X_reconstruction = np.maximum(X_reconstruction, 0)
+
+    # Partitions back into regions
+    X_reconstruction = split_into_regions(X_reconstruction, X)
+
+    # # Split U and V into region dicts
+    U = split_into_regions(U, X)
+    V = {k: u.T for k, u in U.items()}
+
+    return (
+        Z,
+        U,
+        V,
+        X_reconstruction,
+    )  # , b_dec_init
+
+
+def _pca_reconstruction(
+    X: dict, n_components: int, loss_func: str, init="unique"
+) -> tuple[np.ndarray, dict, dict, dict, dict]:
+    """
+    Computes the reconstruction of the neural activity using principal component analysis
+
+    Parameters
+    ----------
+    X : dict
+        Format described in quickstart.ipynb, but now all trials are concatenated into a np.ndarray
+        for each region
+    n_components : int
+        The number of latent factors used in PCA
+    loss_func : str
+        The loss function - need to make reconstructions >= 0 for spiking data
+    init : str
+        Whether to initialize the model using PCA shared across all regions or use a block sparse
+        initialization where each block is PCA applied to each region separately.
+
+    Returns
+    -------
+    Z : np.ndarray
+        latents computed using PCA
+    U : dict
+        PCA loadings to be used as mSCA's initial encoder
+    V : dict
+        PCA loadings to be used as mSCA's initial decoder
+    X_reconstruction : dict
+        Reconstruction from using PCA
+    b_enc_init : np.ndarray
+        Initial bias term to use in PCA's encoder
+    b_dec_init : dict
+        Initial bias term to use in PCA's decoder
+    """
+    # Concatenate X across regions
+    X_r_concat = np.concatenate(list(X.values()), axis=1)
+
+    if init == "shared":
+        Z, U, V, X_reconstruction = _init_shared(X, n_components, loss_func)
+    elif init == "unique":
+        Z, U, V, X_reconstruction = _init_unique(X, n_components, loss_func)
+    else:
+        raise NotImplementedError
 
     # TODO: does it make more sense to have this before the encoding?
     if loss_func == "Poisson":
@@ -248,7 +328,8 @@ def _compute_lam_region(
         Region sparsity penalty (lam_region) computed relative to the reconstruction loss.
     """
     # Set the magnitude function - using lambda function in case we change it
-    mag_f = lambda x: np.std(x, axis=0)
+    # mag_f = lambda x: np.std(x, axis=0)
+    mag_f = lambda x: np.var(x, axis=0)
 
     # Compute the magnitude across all latents
     mag_z = mag_f(Z)
@@ -256,11 +337,8 @@ def _compute_lam_region(
     # Penalty is applied to tensor of (n_components x n_regions)
     n_regions = len(relative_reconstruction_loss.keys())
 
-    # Estimate region-scaling parameters - assuming 10% of the latents are region-specific
-    C = np.random.binomial(n=1, p=0.9, size=(n_components, n_regions))
-
     # Find total contribution - want sparsity across regions (each row)
-    L_region = np.abs(C * mag_z[:, None]).sum(axis=1).sum()
+    L_region = np.abs(mag_z[:, None]).sum(axis=1).sum()
 
     # If the user has not manually passed a region-sparsity value use defaults
     if pct is None:
@@ -279,6 +357,7 @@ def _initialize(
     lam_sparse: Union[None, float],
     lam_orthog: Union[None, float],
     lam_region: Union[None, float],
+    init: str,
 ) -> tuple[
     dict,  # encoder
     dict,  # decoder
@@ -306,10 +385,7 @@ def _initialize(
 
     # Compute the PCA reconstruction
     Z, U, V, X_reconstruction, b_dec_init = _pca_reconstruction(
-        X_smoothed_concat,
-        n_components=n_components,
-        loss_func=loss_func,
-        X_orig=X_concat,
+        X_smoothed_concat, n_components=n_components, loss_func=loss_func, init=init
     )
 
     # Compute the relative reconstruction loss
@@ -323,9 +399,12 @@ def _initialize(
     rws = _compute_region_weights(relative_reconstruction_loss)
 
     # Compute the latent sparsity loss as a function of initial reconstruction loss
-    lam_sparse = _compute_lam_sparse(
-        Z, relative_reconstruction_loss, loss_func, pct=lam_sparse
-    )
+    if lam_sparse != "adaptive":
+        lam_sparse = _compute_lam_sparse(
+            Z, relative_reconstruction_loss, loss_func, pct=lam_sparse
+        )
+    else:
+        lam_sparse = None
 
     # Compute the orthogonality loss as a function of the initial reconstruction loss
     lam_orthog = _compute_lam_orthog(

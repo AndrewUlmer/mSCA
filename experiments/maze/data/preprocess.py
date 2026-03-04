@@ -9,7 +9,9 @@ from scipy.ndimage.filters import gaussian_filter1d
 
 if __name__ == "__main__":
     load_folder = "/Users/andrewulmer/nuin/research/mSCA/experiments/maze/data/"
-    data = io.loadmat(load_folder + "kaufman_trial_py2_good_fewertr")  # fewer neurons
+    data = io.loadmat(
+        load_folder + "kaufman_trial_py2_good_fewertr_andrew"
+    )  # fewer neurons
 
     move_time_rel = data[
         "move_time_rel"
@@ -38,7 +40,7 @@ if __name__ == "__main__":
     move_times = [int(move_time_rel[0][i].item() / 10) + 30 for i in trial_idxs]
 
     # Grab the target times
-    tgt_times = [30] * 500
+    tgt_times = [50] * 500
 
     # Save x
     X = {"M1": m1_data, "PMd": pmd_data, "move_idxs": move_times, "tgt_idxs": tgt_times}

@@ -180,18 +180,18 @@ def pseudo_r2(
         the negative log-likelihood for the null model
 
     """
-    # Compute log-likelihood for saturated model
-    sat_ll = poisson_f(X_target, X_target)
+    # Compute negative log-likelihood for saturated model
+    sat_nll = poisson_f(X_target, X_target)
 
-    # Compute the null log-likelihood
-    null_ll = poisson_f(mean_fr, X_target)
+    # Compute the null negative log-likelihood
+    null_nll = poisson_f(mean_fr, X_target)
 
-    # Compute the actual log-likelihood
-    ll = poisson_f(predictions, X_target)
+    # Compute the actual negative log-likelihood
+    nll = poisson_f(predictions, X_target)
 
     # Compute the pseudo-r2 - note these are NLLs
-    D_model = ll.sum() - sat_ll.sum()
-    D_null = null_ll.sum() - sat_ll.sum()
+    D_model = nll.sum() - sat_nll.sum()
+    D_null = null_nll.sum() - sat_nll.sum()
     r2 = 1 - (D_model / D_null)
 
     return r2
@@ -223,8 +223,6 @@ def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
 
     # Initialize the KFold object across trials
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
-
-    criterion = eval(f"{msca.loss_func}_f".lower())
 
     # Iterate over the folds
     performances_all = []  # {k: [] for k in X_train.keys()}
@@ -264,6 +262,85 @@ def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
             Z_test = Z_concat_test[k]
 
             # # Grab the held-out neurons on the training/testing time points
+            X_train_heldout_r = X_val_concat_train[k]
+            X_test_heldout_r = X_val_concat_test[k]
+
+            # Fit a linear regression model to map from training latents to held-out neurons
+            lr = LinearRegression()
+            lr.fit(Z_train, X_train_heldout_r)
+
+            # Predict held-out neurons on held-out time-points
+            predictions_r = lr.predict(Z_test)
+
+            predictions.append(predictions_r)
+            X_test_heldout.append(X_test_heldout_r)
+
+        predictions = np.concatenate(predictions, axis=1)
+        X_test_heldout = np.concatenate(X_test_heldout, axis=1)
+        loss = r2_score(X_test_heldout, predictions, multioutput="variance_weighted")
+        performances_all.append(loss)
+
+    return performances_all
+
+
+@torch.no_grad()
+def evaluate_trial_average_not_msca(Z, X_train, X_val, n_splits=5):
+    """
+    This is used to evaluate a bi-cross-validation fold, when actually
+    holding out neurons. This method does the same thing as
+    evaluate_trial_average. However, it's meant to be used with latents
+    that have already been inferred using another model e.g. CCA
+
+    Parameters
+    ----------
+    Z : object
+        latents
+    X_train : dict
+        A dictionary containing neural activity used in the training set. Should
+        be the same format as described in quickstart.ipynb
+    X_val : dict
+        A dictionary containing the neural activity used in the validation set.
+    n_splits : int
+        Number of splits to use across time.
+    """
+    # Store variable for timepoints
+    T = np.arange(len(Z[list(Z.keys())[0]]))
+
+    # Initialize the KFold object across trials
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+
+    # Iterate over the folds
+    performances_all = []
+    for train_index, test_index in kf.split(T):
+        # Grab the latents on training trials
+        Z_concat_train = {
+            k: np.concatenate([v[i] for i in train_index], axis=0) for k, v in Z.items()
+        }
+
+        # Grab the latents on testing trials
+        Z_concat_test = {
+            k: np.concatenate([v[i] for i in test_index], axis=0) for k, v in Z.items()
+        }
+
+        # Grab the validation neurons on training trials
+        X_val_concat_train = {
+            k: np.concatenate([v[i] for i in train_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        # Grab the validation neuron on testing trials
+        X_val_concat_test = {
+            k: np.concatenate([v[i] for i in test_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        predictions, X_test_heldout = [], []
+        for k in Z_concat_train.keys():
+            # Grab the latents on the training/testing time points
+            Z_train = Z_concat_train[k]
+            Z_test = Z_concat_test[k]
+
+            # # Grab the held-out neurons on the training/testing time points
             X_train_heldout = X_val_concat_train[k]
             X_test_heldout_r = X_val_concat_test[k]
 
@@ -274,15 +351,117 @@ def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
             # Predict held-out neurons on held-out time-points
             predictions_r = lr.predict(Z_test)
 
-            if msca.loss_func == "Poisson":
-                predictions = np.maximum(predictions_r, 0)
-
             predictions.append(predictions_r)
             X_test_heldout.append(X_test_heldout_r)
 
         predictions = np.concatenate(predictions, axis=1)
         X_test_heldout = np.concatenate(X_test_heldout, axis=1)
-        loss = r2_score(X_test_heldout, predictions)
+        loss = r2_score(X_test_heldout, predictions, multioutput="variance_weighted")
+        performances_all.append(loss)
+
+    return performances_all
+
+
+@torch.no_grad()
+def evaluate_single_trials(msca, X_train, X_val, n_splits=5):
+    """
+    This is used to evaluate a bi-cross-validation fold, when actually
+    holding out neurons
+
+    Parameters
+    ----------
+    msca : object
+        A trained instantiation of mSCA
+    X_train : dict
+        A dictionary containing neural activity used in the training set. Should
+        be the same format as described in quickstart.ipynb
+    X_val : dict
+        A dictionary containing the neural activity used in the validation set.
+    n_splits : int
+        Number of splits to use across time.
+    """
+    # Compute the latents on all the training neurons
+    Z = msca.transform(X_train)
+
+    # Concatenate Z across all trials
+    Z = {k: np.concatenate(v, axis=0) for k, v in Z.items()}
+
+    # Concatenate the validation set across all trials
+    X_val = {
+        k: np.concatenate([v_i[msca.trunc] for v_i in v], axis=0)
+        for k, v in X_val.items()
+    }
+
+    # Store variable for timepoints
+    k0 = list(Z.keys())[0]
+    T = np.arange(Z[k0].shape[0])
+
+    # Initialize the KFold object across trials
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+
+    # Iterate over the folds
+    performances_all = []
+    for train_index, test_index in kf.split(T):
+
+        # Grab the latents on training trials
+        Z_concat_train = {
+            k: np.stack([v[i] for i in train_index], axis=0) for k, v in Z.items()
+        }
+
+        # Grab the latents on testing trials
+        Z_concat_test = {
+            k: np.stack([v[i] for i in test_index], axis=0) for k, v in Z.items()
+        }
+
+        # Grab the validation neurons on training trials
+        X_val_concat_train = {
+            k: np.stack([v[i] for i in train_index], axis=0) for k, v in X_val.items()
+        }
+
+        # Grab the validation neuron on testing trials
+        X_val_concat_test = {
+            k: np.stack([v[i] for i in test_index], axis=0) for k, v in X_val.items()
+        }
+
+        # Containers for holding predictions and held-out activity
+        predictions, X_test_heldout = [], []
+
+        # Iterate over regions
+        for r in Z_concat_train.keys():
+            # Grab the latents on the training/testing time points
+            Z_train_r = Z_concat_train[r]
+            Z_test_r = Z_concat_test[r]
+
+            # Grab the held-out neurons on the training/testing time points
+            X_train_heldout_r = X_val_concat_train[r]
+            X_test_heldout_r = X_val_concat_test[r]
+
+            # Fit a linear regression model to map from training latents to held-out neurons
+            lr = LinearRegression()
+            lr.fit(Z_train_r, X_train_heldout_r)
+
+            ### TESTING: using Poisson GLM instead of linear regression
+            # lr = PoissonRegressorWrapper(alpha=0.001)  # 0001)
+            # score = lr.model.score(Z_test, X_test_heldout_r)
+            # performances_all.append(score)
+
+            # Predict held-out neurons on held-out time-points
+            predictions_r = lr.predict(Z_test_r)
+
+            # Force the predictions to be non-negative if using Poisson model
+            if msca.loss_func == "Poisson":
+                predictions_r = np.maximum(predictions_r, 0)
+
+            # Save the reconstructions and held-out data
+            predictions.append(predictions_r)
+            X_test_heldout.append(X_test_heldout_r)
+
+        # Concatenate the predictions and held-out activity
+        predictions = np.concatenate(predictions, axis=1)
+        X_test_heldout = np.concatenate(X_test_heldout, axis=1)
+
+        # Compute the pseudo-R2 using the model predictions on held-out data
+        loss = pseudo_r2(X_test_heldout, predictions, X_test_heldout.mean(axis=0))
         performances_all.append(loss)
 
     return performances_all

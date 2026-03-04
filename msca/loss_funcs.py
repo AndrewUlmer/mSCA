@@ -141,7 +141,8 @@ def region_sparsity_loss(z: torch.Tensor, scaling: torch.Tensor) -> torch.Tensor
         in the latents signals.
     """
     # Set the magnitude function - using lambda in case we decide to change
-    mag_f = lambda x: x.std(dim=(0, 1))
+    # mag_f = lambda x: x.std(dim=(0, 1))
+    mag_f = lambda x: x.var(dim=(0, 1))
 
     # Detaching magnitude calculation so this loss function doesn't affect latent shape
     z_mag = mag_f(z).detach()
@@ -204,14 +205,13 @@ def gaussian_loss(
     l1 = torch.sum(torch.abs(z))
 
     # Compute the group-sparsity loss
-    gs = region_sparsity_loss(z, F.tanhshrink(scaling))
-    # gs = region_sparsity_loss(z, F.softshrink(scaling))
+    gs = region_sparsity_loss(z, scaling)
 
     # Compute the orthogonality loss
     orth = torch.norm(V.T @ V - torch.eye(V.shape[1], device=V.device)) ** 2
 
     return (
-        rc + l1 * lam_sparse + gs * lam_region + lam_orthog * orth,
+        rc + l1 * lam_sparse + gs * lam_region + orth * lam_orthog,
         {
             "reconstruction": rc.item(),  # type: ignore
             "latent_sparsity": l1.item() * lam_sparse,
@@ -274,18 +274,44 @@ def poisson_loss(
     l1 = torch.sum(torch.abs(z))
 
     # Compute the group-sparsity loss
-    # gs = region_sparsity_loss(z, F.softshrink(scaling))
-    gs = region_sparsity_loss(z, F.tanhshrink(scaling))
+    gs = region_sparsity_loss(z, scaling)
 
     # Compute the orthogonality loss
     orth = torch.norm(V.T @ V - torch.eye(V.shape[1], device=V.device)) ** 2
 
     return (
-        rc + l1 * lam_sparse + gs * lam_region + lam_orthog * orth,
+        rc + l1 * lam_sparse + gs * lam_region + orth * lam_orthog,
         {
-            "reconstruction": rc,  # .item(),  # type: ignore
-            "latent_sparsity": l1,  # .item(),
-            "region_sparsity": gs * lam_region,  # .item(),
-            "orthogonality": orth,  # * lam_orthog,  # .item(),
+            "reconstruction": rc.item(),  # type: ignore
+            "latent_sparsity": l1.item() * lam_sparse,
+            "region_sparsity": gs.item() * lam_region,
+            "orthogonality": orth.item() * lam_orthog,
         },
     )
+
+
+#### BEGIN TESTING CODE ####
+def group_sparsity(V, rs):
+    """
+    Computes the group-sparsity on the loadings of the
+    decoder.
+
+    Arguments
+    ----------
+    V : torch.tensor
+        This is the linear decoder read-out matrix
+
+    Returns
+    ----------
+    loss : torch.tensor
+        Group-sparsity: L1 of L2 norms applied to
+        region-specific portions of the decoder loadings
+
+    """
+    loss, d0, d1 = [], 0, 0
+    for r in rs:  # V.rs:
+        d1 = d0 + r
+        # loss.append((V.model.weight[d0:d1]**2).sum(axis=0).sqrt())
+        loss.append((V[d0:d1] ** 2 + 1e-6).sum(axis=0).sqrt())
+        d0 = d1
+    return torch.stack(loss, axis=0).abs().sum()

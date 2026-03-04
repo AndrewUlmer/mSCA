@@ -21,7 +21,9 @@ if __name__ == "__main__":
         "PMd": [x.astype("float32") for x in data["PMd"]],
     }
 
-    msca, losses = mSCA(n_components=20, n_epochs=6000, loss_func="Poisson").fit(X)
+    msca, losses = mSCA(
+        n_components=20, n_epochs=6000, loss_func="Poisson", filter_len=31
+    ).fit(X)
 
     print("something")
 

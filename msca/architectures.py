@@ -75,11 +75,8 @@ class Encoder(nn.Module):
 
             # If using a nonlinear encoder, set the weights s.t. they approximate PCA
             else:
-                # Note that tanhshrink is used for achieving sparser latents. Can swap out
-                # for other nonlinearities if not concerned with sparsity
+                # Note that using ReLU to get sparser latent activations
                 self.model[region] = torch.nn.Sequential(
-                    nn.Linear(weights.shape[1], weights.shape[1]),
-                    nn.ReLU(),
                     nn.Linear(weights.shape[1], weights.shape[1]),
                     nn.ReLU(),
                     nn.Linear(weights.shape[1], weights.shape[0]),
@@ -90,13 +87,8 @@ class Encoder(nn.Module):
                     weights.shape[1]
                 )
 
-                ### TESTING
-                self.model[region][2].weight.data = torch.eye(  # type:ignore
-                    weights.shape[1]
-                )
-
                 # Initialize dimensionality reduction portion with PCA loadings
-                self.model[region][4].weight.data = torch.tensor(  # type: ignore
+                self.model[region][2].weight.data = torch.tensor(  # type: ignore
                     weights, dtype=torch.float32
                 )
 
@@ -166,7 +158,7 @@ class Decoder(nn.Module):
         # Initialize using PCA loadings
         V_combined = torch.cat([torch.tensor(v) for v in init_decoder.values()])
 
-        # Have to use .weight = to assign the weights, not .weight.data
+        # Initialize the decoder
         self.model.weight = torch.tensor(V_combined, dtype=torch.float32)
 
         # Initialize bias
@@ -295,8 +287,10 @@ class mSCA_architecture(nn.Module):
             region_sizes,
             loss_func,
         )
+
+        # Initializing close to 1 (clamping makes gradient = 0)
         self.decoder_scaling = nn.Parameter(
-            torch.ones(self.n_components, len(region_sizes)) * 2.0
+            torch.ones(self.n_components, len(region_sizes)) * 0.99
         )
 
         # Initialize the convolutional filters
@@ -304,16 +298,24 @@ class mSCA_architecture(nn.Module):
             self.n_components, len(self.region_sizes), filter_length, max_smoothing
         )
 
-    ### TESTING: USED TO RETURN GRADIENT MAGNITUDES IN ARCHITECTURE DEPENDENT WAY
-    def _retrieve_grads(self):
+        # ### TESTING: unique initialization
+        # self.decoder_scaling.data[:20, 1] = 0.1
+        # self.decoder_scaling.data[20:, 0] = 0.1
+
+    def _retrieve_grads(self) -> torch.Tensor:
+        """
+        This function retrieves the gradients with respect to the encoder for
+        automatically adjusting the level of sparsity used by the model while training
+        """
+
         grads = []
         for k in self.encoder.model.keys():
             if self.linear:
                 grads.append(self.encoder.model[k].weight.grad)
             else:
-                grads.append(self.encoder.model[k][4].weight.grad)
+                grads.append(self.encoder.model[k][2].weight.grad)
 
-        return torch.cat(grads, axis=1).norm(p=2)
+        return torch.cat(grads, axis=1)
 
     def forward(self, X: dict) -> tuple[
         torch.Tensor,  # latent combined across regions
@@ -353,7 +355,7 @@ class mSCA_architecture(nn.Module):
         # Reverse filter each region's latents + smooth
         Z_r = self.filters(Z_r, mode="encode")
 
-        # Encoder region-scaling
+        # Encoder region-scaling - leaving here, previously used for weight-tying
         Z_r = {
             k: (Z_r[k] * self.encoder_scaling[:, i]) for i, k in enumerate(Z_r.keys())
         }
@@ -367,12 +369,8 @@ class mSCA_architecture(nn.Module):
         # Convolve with region-specific filters
         Z_r_shift = self.filters(Z_r_shift, mode="decode")
 
-        # tanhshrink to allow thresholding of latents for each region
-        region_scaling = F.tanhshrink(self.decoder_scaling)
-        # region_scaling = F.softshrink(self.decoder_scaling)
-
         # Clamp region scalars between -1 and 1
-        region_scaling = torch.clamp(region_scaling, min=-1.0, max=1.0)
+        region_scaling = torch.clamp(self.decoder_scaling, min=-1.0, max=1.0)
 
         # Apply the region-wise scaling parameter
         Z_r = {k: Z_r_shift[k] * region_scaling[:, i] for i, k in enumerate(Z_r.keys())}
@@ -380,5 +378,4 @@ class mSCA_architecture(nn.Module):
         # Reconstruct the input data
         X_reconstruction = self.decoder(Z_r)
 
-        # TESTING: 3-part decoding
         return Z, Z_r, X_reconstruction  # type: ignore

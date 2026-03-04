@@ -19,6 +19,134 @@ def _create_filter(shift: int, max_shift: int) -> np.ndarray:
     return f
 
 
+def simulate_trial_averages_multi(
+    T: int = 600,  # Number of timepoints per trial
+    n_trials: int = 10,  # Number of trials (trial averages)
+    n_regions: int = 2,  # Number of brain regions
+    n_neurons: int = 100,  # Number of neurons per region
+    max_shift: int = 5,  # Maximum time shift (in either direction)
+    r_sim: int = 5,  # Number of simulated latent dimensions
+    noise_level: float = 0.1,  # Noise level for trials
+    random_seed: int = 0,
+    num_pop: int = 2,
+) -> tuple[dict, dict, np.ndarray]:
+    """
+    Simulates a trial-average dataset for mSCA with specified parameters.
+
+    Parameters
+    ----------
+    T : int
+        Number of timepoints per trial.
+    n_trials : int
+        Number of trials (trial averages).
+    n_regions : int
+        Number of brain regions.
+    n_neurons : int
+        Number of neurons per region.
+    max_shift : int
+        Maximum time shift (in either direction).
+    r_sim : int
+        Number of simulated latent dimensions.
+    noise_level : float
+        Standard deviation of the Gaussian noise added to trials.
+    random_seed : int
+        Seed for numpy random number generator for reproducibility.
+    num_pop : int
+        Number of populations to generate in simulation
+
+    Returns
+    -------
+    X : dict
+        A dictionary containing the simulated data in the format
+        {'Region_0': [trial_1, ...], 'Region_1': [trial_1, ...]}.
+    Z_gt : np.ndarray
+        Ground-truth latent factors.
+    delays_gt : np.ndarray
+        Ground-truth delays for each latent factor.
+
+    """
+    np.random.seed(random_seed)
+
+    if n_regions > 2:
+        # TODO: allow for simulating n_regions - currently only supports 2
+        raise NotImplementedError
+
+    # Matrices that project low dimensional space into high-D "neural space"
+    V = [np.random.randn(n_neurons, r_sim) for _ in range(num_pop)]
+
+    # Make projections unit-norm
+    V = [v_i / np.linalg.norm(v_i, axis=0) for v_i in V]
+
+    # Create ground-truth (simulated) latents
+    Z = np.zeros([T + 2 * max_shift, r_sim])
+    for i in range(r_sim):
+        Z[max_shift + (100 * i) : max_shift + (100 * i) + 200, i] = _create_sine(
+            200, i + 1
+        )
+
+    # Create ground-truth time-shifts - defined w.r.t. reference region
+    delays = np.random.randint(
+        low=-max_shift, high=max_shift, size=(r_sim, num_pop - 1), dtype="int32"
+    )
+
+    # No delays for region-specific dimensions
+    delays[0, :] = delays[-1, :] = 0
+
+    ## TESTING: 1-bin delay
+    # delays[1] = -1
+
+    # Create latents for every population
+    Zs = [np.zeros_like(Z) for _ in range(num_pop)]
+
+    # Make first region un-shifted
+    Zs[0] = Z
+
+    # Iterate through and time-shift other regions w.r.t the first
+    gt_delays = []
+    for dim, delay in enumerate(delays):
+        # Create filter for convolving each region
+        fs = [_create_filter(d, max_shift=max_shift) for d in delay]
+
+        # Iterate through
+        for i, f in enumerate(fs):
+            Zs[i + 1][:, dim] = np.convolve(Zs[0][:, dim], f, mode="same")
+
+        gt_delays.append(np.stack([0] + [d for d in delay]))
+
+    # Compute the ground-truth time-shifts
+    gt_delays = np.array(gt_delays)
+
+    # Make first dimension unique to only one region
+    specific_dim = np.random.choice(num_pop)
+    for i in range(len(Zs)):
+        if i != specific_dim:
+            Zs[i][:, 0] = 0
+
+    # Make last dimension exist in all but one region
+    specific_dim = np.random.choice(num_pop)
+    for i in range(len(Zs)):
+        if i == specific_dim:
+            Zs[i][:, -1] = 0
+
+    # Pad the latents to account for mSCA truncation
+    padding = np.zeros((max_shift * 2 + 10, r_sim))
+    Zs = [np.concatenate([padding, z_i, padding]) for z_i in Zs]
+
+    # Project latents up into firing-rate space
+    X_fr = [z @ v.T for z, v in zip(Zs, V)]
+
+    # Create trials by adding noise to high-D latents
+    X = {f"X{i}": [] for i in range(len(Zs))}
+    for i in range(len(Zs)):
+        for tri_num in range(n_trials):
+            X[f"X{i}"].append((X_fr[i] + noise_level * np.random.randn(*X_fr[i].shape)))
+
+    # Add ground-truth latents to a dictionary
+    Z_gt = {f"X{i}": v for i, v in enumerate(Zs)}
+
+    return X, Z_gt, gt_delays  # type: ignore
+
+
 def simulate_trial_averages(
     T: int = 600,  # Number of timepoints per trial
     n_trials: int = 10,  # Number of trials (trial averages)
@@ -50,6 +178,8 @@ def simulate_trial_averages(
         Standard deviation of the Gaussian noise added to trials.
     random_seed : int
         Seed for numpy random number generator for reproducibility.
+    num_pop : int
+        Number of populations to generate in simulation
 
     Returns
     -------

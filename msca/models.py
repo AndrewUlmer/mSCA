@@ -13,8 +13,10 @@ from .utils import *
 
 # from msca.evaluations import bootstrap_performances
 
-r_grads = []
-l1_grads = []
+r_grads_all = []
+l1_grads_all = []
+
+sims = []
 
 
 def convert_to_dataloader(X, batch_size=64, shuffle=True):
@@ -97,7 +99,7 @@ class mSCA:
         filter_len: int = 21,
         linear: bool = False,
         region_weights: Union[None, list[np.ndarray]] = None,
-        lam_sparse: Union[None, float] = None,
+        lam_sparse: Union[None, float, str] = "adaptive",
         lam_orthog: Union[None, float] = None,
         lam_region: Union[None, float] = None,
         batch_size: int = 64,
@@ -105,6 +107,8 @@ class mSCA:
         device: str = "cpu",
         cd_mode: str = "both",
         post_hoc_epoch: int = 1000,
+        balance_interval: int = 100,
+        init: str = "unique",
     ):
         self.n_components = n_components
         self.n_epochs = n_epochs
@@ -121,6 +125,8 @@ class mSCA:
         self.device = device
         self.cd_mode = cd_mode
         self.post_hoc_epoch = post_hoc_epoch
+        self.balance_interval = balance_interval
+        self.init = init
 
     def fit(
         self, X: dict[str, list[np.ndarray]], load: bool = False
@@ -145,6 +151,7 @@ class mSCA:
             self.lam_sparse,
             self.lam_orthog,
             self.lam_region,
+            self.init,
         )
 
         # Set hyperparameters to be used during training
@@ -154,9 +161,15 @@ class mSCA:
         print(f"Using region-weights = {auto_region_weights}")
 
         # Automatically set lam_sparse
-        self.lam_sparse = (
-            auto_lam_sparse if self.cd_rate == 0.0 else auto_lam_sparse * self.cd_rate
-        )
+        if self.lam_sparse == "adaptive":
+            self.lam_sparse_mode = "adaptive"
+        else:
+            self.lam_sparse = (
+                auto_lam_sparse
+                if self.cd_rate == 0.0
+                else auto_lam_sparse * self.cd_rate
+            )
+            self.lam_sparse_mode = "fixed"
         print(f"Using lam_sparse = {self.lam_sparse}")
 
         # Automatically set the orthogonality penalty
@@ -165,7 +178,7 @@ class mSCA:
         )
         print(f"Using lam_orthog = {self.lam_orthog}")
 
-        # Region-sparsity loss
+        # Automatically set the orthogonality penalty
         self.lam_region = (
             auto_lam_region if self.cd_rate == 0.0 else auto_lam_region * self.cd_rate
         )
@@ -180,6 +193,7 @@ class mSCA:
             self.n_components,
             linear=self.linear,
             loss_func=self.loss_func,
+            filter_length=self.filter_len,
         )
 
         # Convert input data to dataloader
@@ -192,7 +206,10 @@ class mSCA:
 
         # Make coordinated dropout object
         self.cd = CoordinatedDropout(
-            self.n_components, self.cd_rate, self.filter_len, mode=self.cd_mode
+            self.n_components,
+            self.cd_rate,
+            self.filter_len,
+            mode=self.cd_mode,
         )
 
         # Used for truncating trials
@@ -211,19 +228,16 @@ class mSCA:
             "total_loss": [],
         }
 
-        #### TESTING GRADIENT BALANCING
-        balance_interval = 10
-
         if not load:
             # Iterate through training loop
             for epoch in tqdm(range(self.n_epochs)):
 
-                # Model will start post-hoc training at (self.n_epochs - self.post_hoc_epoch)
                 if epoch < (self.n_epochs - self.post_hoc_epoch):
-                    # If using gradient balancing for sparsity
-                    if (epoch % balance_interval == 0) and (balance_interval != np.inf):
-                        self.lam_sparse = self.loop(data_loader, mode="balance")
-                        print(f"New lam_sparse = {self.lam_sparse}")
+                    if (epoch % self.balance_interval == 0) and (
+                        self.lam_sparse_mode == "adaptive"
+                    ):
+                        new_lam_sparse = self.loop(data_loader, mode="balance-sparsity")
+                        self.lam_sparse = new_lam_sparse
 
                     # Training step
                     self.criterion = train_criterion
@@ -240,6 +254,9 @@ class mSCA:
                 train_loss_dicts["region_sparsity"].append(loss_dict["region_sparsity"])
                 train_loss_dicts["orthogonality"].append(loss_dict["orthogonality"])
                 train_loss_dicts["total_loss"].append(loss_dict["total_loss"])
+
+                ## TESTING: recording decoder scaling
+                sims.append(self.model.decoder_scaling.clone().detach().numpy())
 
             # Concatenate training losses over all epochs
             train_loss_dicts = {k: np.array(v) for k, v in train_loss_dicts.items()}
@@ -268,8 +285,8 @@ class mSCA:
         }
 
         # Set the reconstruction loss function if post-hoc training
-        if mode in ["post-hoc-scaling", "balance"]:
-            r_grads, l1_grads = [], []
+        if mode in ["post-hoc-scaling", "balance-sparsity"]:
+            r_grads, l1_grads, orth_grads, r_orth_grads = [], [], [], []
             r_loss_f = eval(self.loss_func.lower() + "_f")
 
         # Iterate over trials in the data_loader
@@ -334,7 +351,7 @@ class mSCA:
                 # Store the reconstruction loss during the post-hoc period
                 epoch_loss_dict["reconstruction"] += r_loss.item()
 
-            elif mode == "balance":
+            elif mode == "balance-sparsity":
                 # Compute the reconstruction loss
                 r_loss = reconstruction_loss(
                     X_reconstruction_masked,  # type: ignore
@@ -361,7 +378,9 @@ class mSCA:
                 l1_grad = self.model._retrieve_grads()
                 self.optimizer.zero_grad(set_to_none=True)
 
-                r_grads.append(r_grad), l1_grads.append(l1_grad)
+                # Accumulate gradients over trials
+                r_grads.append(r_grad.norm(p=2))
+                l1_grads.append(l1_grad.norm(p=2))
 
             # Accumulate loss
             if mode == "train":
@@ -385,11 +404,18 @@ class mSCA:
                     for k in self.region_names
                 ]
 
-        if mode != "balance":
+        if mode in ["train", "evaluate", "post-hoc-scaling"]:
             return latents, reconstructions, epoch_loss_dict
-        else:
-            r_grads, l1_grads = torch.stack(r_grads), torch.stack(l1_grads)
-            return r_grads.mean() / l1_grads.mean()
+
+        elif mode == "balance-sparsity":
+            # Stack gradients for reconstruction and sparsity across trials
+            r_grads = torch.stack(r_grads)
+            l1_grads = torch.stack(l1_grads)
+
+            # Adjust lam_sparse to match reconstruction learning rate
+            lam_sparse = r_grads.mean() / l1_grads.mean()
+
+            return lam_sparse
 
     @torch.no_grad()
     def transform(
