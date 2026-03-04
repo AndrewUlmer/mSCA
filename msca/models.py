@@ -108,7 +108,7 @@ class mSCA:
         cd_mode: str = "both",
         post_hoc_epoch: int = 1000,
         balance_interval: int = 100,
-        init: str = "unique",
+        init: str = "shared",
     ):
         self.n_components = n_components
         self.n_epochs = n_epochs
