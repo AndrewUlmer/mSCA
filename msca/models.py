@@ -82,6 +82,12 @@ class mSCA:
         Batch size for training (default: 64).
     cd_rate : float, optional
         Coordinated dropout rate (default: 0.0).
+    decoder_type : str, optional
+    Which decoder to use: "linear" (default) or "nonlinear".
+    decoder_hidden_size : int, optional
+        Hidden size for the nonlinear decoder (default: 128).
+    decoder_activation : str, optional
+        Activation for the nonlinear decoder (default: "GeLU").
 
     TODO:
         - Confirm defaults for hyperparameters (lam_x) work properly
@@ -104,6 +110,9 @@ class mSCA:
         lam_region: Union[None, float] = None,
         batch_size: int = 64,
         cd_rate: float = 0.5,
+        decoder_type: str = "linear",
+        decoder_hidden_size: int = 128,
+        decoder_activation: str = "GeLU",
         device: str = "cpu",
         cd_mode: str = "both",
         post_hoc_epoch: int = 1000,
@@ -123,6 +132,9 @@ class mSCA:
         self.batch_size = batch_size
         self.cd_rate = cd_rate
         self.device = device
+        self.decoder_type = decoder_type
+        self.decoder_hidden_size = decoder_hidden_size
+        self.decoder_activation = decoder_activation
         self.cd_mode = cd_mode
         self.post_hoc_epoch = post_hoc_epoch
         self.balance_interval = balance_interval
@@ -193,7 +205,13 @@ class mSCA:
             self.n_components,
             linear=self.linear,
             loss_func=self.loss_func,
+<<<<<<< HEAD
             filter_length=self.filter_len,
+=======
+            decoder_type=self.decoder_type,
+            decoder_hidden_size=self.decoder_hidden_size,
+            decoder_activation=self.decoder_activation,
+>>>>>>> 532cd3f (nonlinear decoder implementation)
         )
 
         # Convert input data to dataloader
@@ -240,7 +258,7 @@ class mSCA:
                         self.lam_sparse = new_lam_sparse
 
                     # Training step
-                    self.criterion = train_criterion
+                    self.criterion = train_criterion # the loss function (Gaussian or Poisson) used during the main training period
                     _, _, loss_dict = self.loop(data_loader, mode="train")
 
                 elif epoch == self.n_epochs - self.post_hoc_epoch:
@@ -266,6 +284,20 @@ class mSCA:
         else:
             # This is used to return the initialized model (containers for model exist)
             return self  # type: ignore
+
+    def _decoder_weight_for_loss(self) -> torch.Tensor:
+        """
+        Returns the decoder matrix used for orthogonality regularization.
+
+        - linear decoder: decoder.model.weight
+        - nonlinear decoder: effective decoder matrix output_layer @ hidden_layer
+        """
+        if self.decoder_type.lower() == "linear":
+            return self.model.decoder.model.weight
+
+        hidden_w = self.model.decoder.hidden_layer.weight
+        output_w = self.model.decoder.output_layer.weight
+        return output_w @ hidden_w
 
     def loop(
         self, data_loader: torch.utils.data.DataLoader, mode: str = "train"
@@ -311,6 +343,9 @@ class mSCA:
             Z_masked = self.cd.mask(Z, truncate(Z_mask, self.half_trunc))
 
             if mode == "train":
+                # get the decoder weight (linear/ nonlinear)
+                decoder_weight = self._decoder_weight_for_loss()
+
                 # Compute the loss
                 loss, loss_dict = self.criterion(
                     X_reconstruction_masked,
@@ -321,7 +356,7 @@ class mSCA:
                     self.lam_region,
                     self.lam_orthog,
                     self.model.decoder_scaling,
-                    self.model.decoder.model.weight,
+                    decoder_weight,
                     mode=mode,
                 )
 
@@ -489,6 +524,37 @@ class mSCA:
         """
         torch.save(self.model.state_dict(), f)
 
+    def save_losses(self, losses: dict[str, np.ndarray], f: str):
+        """
+        Method for saving training losses from mSCA.fit
+
+        Parameters
+        ----------
+        losses : dict[str, np.ndarray]
+            Loss dictionary returned by fit().
+        f : str
+            Path to save losses to (.npz recommended).
+        """
+        np.savez(f, **losses)
+
+    
+    def load_losses(f: str) -> dict[str, np.ndarray]:
+        """
+        Method for loading previously saved training losses.
+
+        Parameters
+        ----------
+        f : str
+            Path to saved loss file (.npz).
+
+        Returns
+        -------
+        dict[str, np.ndarray]
+            Dictionary of loss curves keyed by loss name.
+        """
+        with np.load(f, allow_pickle=False) as loaded:
+            return {k: loaded[k] for k in loaded.files}
+
     def load(self, f: str, X: dict):
         """
         Method for loading trained model weights in mSCA
@@ -503,17 +569,42 @@ class mSCA:
         self.n_epochs = 1
         self.fit(X, load=True)
 
-        # Switch mSCA's decoder
-        pre_decoder_w = self.model.decoder.model.weight.data
-        pre_decoder_b = self.model.decoder.model.bias
+        # if self.decoder_type.lower() == "linear":
+        #     # Switch mSCA's decoder
+        #     pre_decoder_w = self.model.decoder.model.weight.data
+        #     pre_decoder_b = self.model.decoder.model.bias
 
-        # Set new decoder
-        new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
-        new_decoder.weight.data = pre_decoder_w
-        new_decoder.bias.data = pre_decoder_b
-        self.model.decoder.model = new_decoder
+        #     # Set new decoder
+        #     new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
+        #     new_decoder.weight.data = pre_decoder_w
+        #     new_decoder.bias.data = pre_decoder_b
+        #     self.model.decoder.model = new_decoder
 
-        self.model.load_state_dict(torch.load(f))
+        # self.model.load_state_dict(torch.load(f))
+        # Load checkpoint to current device
+        state_dict = torch.load(f, map_location=self.device)
+
+        # Backward/forward compatibility for linear decoder weight naming
+        if self.decoder_type.lower() == "linear":
+            ckpt_param_key = "decoder.model.parametrizations.weight.original"
+            ckpt_plain_key = "decoder.model.weight"
+
+            model_keys = set(self.model.state_dict().keys())
+            model_expects_param = ckpt_param_key in model_keys
+            model_expects_plain = ckpt_plain_key in model_keys
+
+            ckpt_has_param = ckpt_param_key in state_dict
+            ckpt_has_plain = ckpt_plain_key in state_dict
+
+            # checkpoint: plain -> model: parametrized
+            if model_expects_param and ckpt_has_plain and not ckpt_has_param:
+                state_dict[ckpt_param_key] = state_dict.pop(ckpt_plain_key)
+
+            # checkpoint: parametrized -> model: plain
+            elif model_expects_plain and ckpt_has_param and not ckpt_has_plain:
+                state_dict[ckpt_plain_key] = state_dict.pop(ckpt_param_key)
+
+        self.model.load_state_dict(state_dict)
 
     def _init_post_hoc(self):
         """
@@ -525,17 +616,31 @@ class mSCA:
         for param in self.model.parameters():
             param.requires_grad = False
 
-        # Switch mSCA's decoder
-        pre_decoder_w = self.model.decoder.model.weight.data
-        pre_decoder_b = self.model.decoder.model.bias
+        if self.decoder_type.lower() == "linear":
+            # Switch mSCA's decoder
+            pre_decoder_w = self.model.decoder.model.weight.data
+            pre_decoder_b = self.model.decoder.model.bias
 
-        # Set new decoder
-        new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
-        new_decoder.weight.data = pre_decoder_w
-        new_decoder.bias.data = pre_decoder_b
-        self.model.decoder.model = new_decoder
+            # Set new decoder
+            new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
+            new_decoder.weight.data = pre_decoder_w
+            new_decoder.bias.data = pre_decoder_b
+            self.model.decoder.model = new_decoder
 
-        # Add new optimizer
-        self.optimizer_post_hoc = torch.optim.Adam(
-            [{"params": self.model.decoder.model.parameters(), "lr": 1e-3}]
-        )
+            # Add new optimizer
+            self.optimizer_post_hoc = torch.optim.Adam(
+                [{"params": self.model.decoder.model.parameters(), "lr": 1e-3}]
+            )
+        else:
+            # Keep nonlinear decoder structure and optimize its decoder layers only.(without optimize the encoder)
+            self.model.decoder.hidden_layer.weight.requires_grad = True
+            self.model.decoder.hidden_layer.bias.requires_grad = True
+            self.model.decoder.output_layer.weight.requires_grad = True
+            self.model.decoder.output_layer.bias.requires_grad = True
+
+            self.optimizer_post_hoc = torch.optim.Adam(
+                [
+                    {"params": self.model.decoder.hidden_layer.parameters(), "lr": 1e-3},
+                    {"params": self.model.decoder.output_layer.parameters(), "lr": 1e-3},
+                ]
+            )

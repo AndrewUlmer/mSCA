@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils.parametrize as P
@@ -78,8 +79,14 @@ class Encoder(nn.Module):
                 # Note that using ReLU to get sparser latent activations
                 self.model[region] = torch.nn.Sequential(
                     nn.Linear(weights.shape[1], weights.shape[1]),
+<<<<<<< HEAD
                     nn.ReLU(),
+=======
+                    nn.Tanhshrink(),
+>>>>>>> 532cd3f (nonlinear decoder implementation)
                     nn.Linear(weights.shape[1], weights.shape[0]),
+                    nn.Tanhshrink(),
+                    nn.Linear(weights.shape[0], weights.shape[0]),
                 )
 
                 # Use identity to get close to PCA equivalence
@@ -92,6 +99,12 @@ class Encoder(nn.Module):
                     weights, dtype=torch.float32
                 )
 
+<<<<<<< HEAD
+=======
+                # Initialize linear part using eye-dentity
+                self.model[region][4].weight.data = torch.eye(weights.shape[0])  # type: ignore
+
+>>>>>>> 532cd3f (nonlinear decoder implementation)
     def forward(self, X: dict) -> dict[str, torch.Tensor]:
         """
         Forward method for encoder module.
@@ -228,7 +241,173 @@ class Decoder(nn.Module):
             d0 = d1
         return rl
 
+# decoder function: reconstruct neural data X from latents Z
+# n_components: number of latent dimensions
+# region_sizes: dict with number of neurons per region
+# output_size: total number of neurons across all regions = sum region sizes
+# shape of weights: (output_size, n_components) = (total neurons, latent dims)
+# shape of bias: (output_size,) = (total neurons,)
+# decoder matrix W (N_total * C) maps latents Z (B * T * C) to reconstructions X (B * T * N_total)
+# pay attention to the region-specific portions of W for each brain region
+# Xk(b,t,:) = W[region_k] * Zk(b,t,:)  + bias[region_k]
 
+class NonlinearDecoder(nn.Module):
+    """
+    NonlinearDecoder module for mSCA. Note that the weights of the nonlinear decoder are constrained
+    to be unit-norm. This is to ensure the sparsity loss works properly.
+
+    Parameters
+    ----------
+    init_decoder : dict
+        Weights computed from PCA initialization in initializations.py
+    init_decoder_bias : dict
+        Initial bias term computed in initializations.py
+    n_components : int
+        The number of latent factors to use
+    region_sizes : dict
+        A dictionary where the keys are the names of each region and the values
+        are the number of neurons in the corresponding region.
+    loss_func : str
+        The reconstruction loss used to train mSCA. Needed to constrain decoder
+        outputs to all positive values if training on spiking data.
+    hidden_size : int
+        The hidden size for the nonlinear decoder
+    activation : str
+        The activation function to use in the nonlinear decoder
+    """
+
+    def __init__(
+        self,
+        init_decoder: dict,
+        init_decoder_bias: dict,
+        n_components: int,
+        region_sizes: dict,
+        loss_func: str,
+        hidden_size: int = 128,
+        activation: str = "GeLU",
+    ):
+        super().__init__()
+        self.region_sizes = region_sizes
+        self.loss_func = loss_func
+        self.hidden_size = hidden_size
+        self.activation = activation.lower()
+        self.n_components = n_components
+
+        # Set the cumulative region sizes for setting decoder dimensionality
+        self.cumsum_rs = torch.cumsum(
+            torch.tensor([0] + list(self.region_sizes.values())), dim=0
+        )
+
+        # Set the output size for specifying the decoder dimensionality
+        output_size = sum(region_sizes.values())
+        # ----- Activation ----- #
+        if self.activation == "gelu":
+            self.act = nn.GELU()
+        else:
+            self.act = nn.GELU()
+        # ----- Model ----- #
+        hidden_layer = nn.Linear(n_components, self.hidden_size, bias=True)
+        self.hidden_layer = P.register_parametrization(hidden_layer, "weight", Sphere(dim=0))
+        output_layer = nn.Linear(self.hidden_size, output_size, bias=True)
+        self.output_layer = P.register_parametrization(output_layer, "weight", Sphere(dim=0))
+
+        
+        # Initialize
+        # If hidden_size == n_components, we can initialize output layer from PCA loadings.
+        # Otherwise, PCA loadings do not match output layer shape and we fall back to Xavier init.
+        if self.hidden_size == self.n_components:
+            self.hidden_layer.weight = torch.eye(self.hidden_size, self.n_components, dtype=torch.float32)  # type: ignore
+            V_combined = torch.cat([torch.tensor(v, dtype=torch.float32) for v in init_decoder.values()])
+            self.output_layer.weight = torch.tensor(V_combined, dtype=torch.float32)  # type: ignore
+        else:
+            self.hidden_layer.weight = torch.eye(self.hidden_size, self.n_components, dtype=torch.float32)  # type: ignore
+            w = torch.empty_like(self.output_layer.weight)
+            nn.init.xavier_uniform_(w)
+            self.output_layer.weight = w
+
+  
+        # Initialize bias
+        self.output_layer.bias.data = torch.cat(
+            [torch.tensor(v, dtype=torch.float32) for v in init_decoder_bias.values()],
+            axis=1,
+        ).squeeze()  # type: ignore
+        
+        # Ensure hidden layer bias is also float32
+        self.hidden_layer.bias.data = self.hidden_layer.bias.data.float()
+
+    def forward(self, Z: dict) -> dict[str, torch.Tensor]:
+        """
+        Forward method for the decoder
+
+        Parameters
+        ----------
+        Z : dict
+            A dictionary where the keys are region names and the values are
+            tensors of shape [batch_size x time-points (truncated) x n_components]
+
+        Returns
+        -------
+        X_reconstruction : dict
+            A dictionary where the keys are region names and the values are tensors
+            of shape [batch_size x time-points (truncated) x N_j] where N_j is the
+            number of neurons in region j.
+        """
+        target_dtype = self.output_layer.weight.dtype
+        target_device = self.output_layer.weight.device
+
+        # Pre-compute region-keys
+        if not hasattr(self, "region_to_idx"):
+            self.region_to_idx = {k: i for i, k in enumerate(Z.keys())}
+
+        # Iterate through region-wise latents
+        X_reconstruction = {}
+        for k, v in Z.items():
+            v = v.to(device=target_device, dtype=target_dtype)
+            # Grab appropriate indices for decoder matrix
+            i = self.region_to_idx[k]
+            start_idx, end_idx = self.cumsum_rs[i], self.cumsum_rs[i + 1]
+
+            # Pass through hidden layer and activation
+            h = self.act(self.hidden_layer(v))
+            h = h.to(dtype=target_dtype)
+            # Output layer with region-specific weights and bias
+            W = self.output_layer.weight[start_idx:end_idx]          # float32 usually
+            b = self.output_layer.bias[start_idx:end_idx] 
+            X_reconstruction[k] = F.linear(
+                h,
+                W,
+                bias=b,
+            )
+
+            if self.loss_func == "Poisson":
+                X_reconstruction[k] = F.softplus(X_reconstruction[k], beta=5.0)
+
+
+        return X_reconstruction
+
+    @torch.no_grad()
+    def r_loadings(self) -> dict[str, np.ndarray]:
+        """
+        Computes the region-specific loading from the decoder matrix to properly account for
+        region-specificity learned by the model. This is used as a scalar multiplier on
+        the region-specific latents for visualization purposes.
+
+        Returns
+        ----------
+        rl : dict
+            Keys are region names and values are tensors of L2 norm of region-specific
+            portion of decoder loading for each region.
+        """
+        # Compute effective decoder weight: output_layer.weight @ hidden_layer.weight
+        # This gives shape (output_size, n_components)
+        effective_weight = self.output_layer.weight @ self.hidden_layer.weight
+        
+        rl, d0, d1 = {}, 0, 0
+        for k, r in self.region_sizes.items():
+            d1 = d0 + r
+            rl[k] = torch.linalg.norm(effective_weight[d0:d1], axis=0).numpy()
+            d0 = d1
+        return rl
 class mSCA_architecture(nn.Module):
     """
     This is a PyTorch module where the bulk of mSCA's computations are completed
@@ -248,6 +427,12 @@ class mSCA_architecture(nn.Module):
     loss_func : str
         Reconstruction loss term used to train mSCA - used to add nonlinearity in
         Decoder if predicting Poisson rates.
+    decoder_type : str
+        Which decoder to use. Options: "linear" (default) or "nonlinear".
+    decoder_hidden_size : int
+        Hidden size for the nonlinear decoder (used only if decoder_type="nonlinear").
+    decoder_activation : str
+        Activation for the nonlinear decoder (used only if decoder_type="nonlinear").
     filter_length : int
         The width of the convolutional filters used to learn time-delays
     max_smoothing : int
@@ -264,6 +449,9 @@ class mSCA_architecture(nn.Module):
         n_components: int,
         linear: bool = False,
         loss_func: str = "Gaussian",
+        decoder_type: str = "linear",
+        decoder_hidden_size: int = 128,
+        decoder_activation: str = "GeLU",
         filter_length: int = 21,
         max_smoothing: int = 10,
     ):
@@ -272,6 +460,7 @@ class mSCA_architecture(nn.Module):
         self.n_components = n_components
         self.linear = linear
         self.loss_func = loss_func
+        self.decoder_type = decoder_type.lower()
 
         # Initialize the encoder
         self.encoder = Encoder(init_encoder, self.linear)
@@ -280,6 +469,7 @@ class mSCA_architecture(nn.Module):
         )
 
         # Initialize the decoder
+<<<<<<< HEAD
         self.decoder = Decoder(
             init_decoder,
             init_decoder_bias,
@@ -291,6 +481,28 @@ class mSCA_architecture(nn.Module):
         # Initializing close to 1 (clamping makes gradient = 0)
         self.decoder_scaling = nn.Parameter(
             torch.ones(self.n_components, len(region_sizes)) * 0.99
+=======
+        if self.decoder_type == "nonlinear":
+            self.decoder = NonlinearDecoder(
+                init_decoder,
+                init_decoder_bias,
+                self.n_components,
+                region_sizes,
+                loss_func,
+                hidden_size=decoder_hidden_size,
+                activation=decoder_activation,
+            )
+        else:
+            self.decoder = Decoder(
+                init_decoder,
+                init_decoder_bias,
+                self.n_components,
+                region_sizes,
+                loss_func,
+            )
+        self.decoder_scaling = nn.Parameter(
+            torch.ones(self.n_components, len(region_sizes))
+>>>>>>> 532cd3f (nonlinear decoder implementation)
         )
 
         # Initialize the convolutional filters
@@ -298,6 +510,7 @@ class mSCA_architecture(nn.Module):
             self.n_components, len(self.region_sizes), filter_length, max_smoothing
         )
 
+<<<<<<< HEAD
         # ### TESTING: unique initialization
         # self.decoder_scaling.data[:20, 1] = 0.1
         # self.decoder_scaling.data[20:, 0] = 0.1
@@ -316,6 +529,19 @@ class mSCA_architecture(nn.Module):
                 grads.append(self.encoder.model[k][2].weight.grad)
 
         return torch.cat(grads, axis=1)
+=======
+        # TESTING: add input bias
+        # self.input_bias_x0 = nn.Parameter(
+        #     torch.zeros(
+        #         100,
+        #     )
+        # )
+        # self.input_bias_x1 = nn.Parameter(
+        #     torch.zeros(
+        #         100,
+        #     )
+        # )
+>>>>>>> 532cd3f (nonlinear decoder implementation)
 
     def forward(self, X: dict) -> tuple[
         torch.Tensor,  # latent combined across regions
@@ -369,6 +595,12 @@ class mSCA_architecture(nn.Module):
         # Convolve with region-specific filters
         Z_r_shift = self.filters(Z_r_shift, mode="decode")
 
+<<<<<<< HEAD
+=======
+        # Softshrink to allow thresholding of latents for each region
+        region_scaling = F.softshrink(self.decoder_scaling)
+
+>>>>>>> 532cd3f (nonlinear decoder implementation)
         # Clamp region scalars between -1 and 1
         region_scaling = torch.clamp(self.decoder_scaling, min=-1.0, max=1.0)
 
