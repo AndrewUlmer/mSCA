@@ -205,13 +205,10 @@ class mSCA:
             self.n_components,
             linear=self.linear,
             loss_func=self.loss_func,
-<<<<<<< HEAD
             filter_length=self.filter_len,
-=======
             decoder_type=self.decoder_type,
             decoder_hidden_size=self.decoder_hidden_size,
             decoder_activation=self.decoder_activation,
->>>>>>> 532cd3f (nonlinear decoder implementation)
         )
 
         # Convert input data to dataloader

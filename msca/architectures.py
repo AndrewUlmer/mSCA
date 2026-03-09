@@ -79,11 +79,7 @@ class Encoder(nn.Module):
                 # Note that using ReLU to get sparser latent activations
                 self.model[region] = torch.nn.Sequential(
                     nn.Linear(weights.shape[1], weights.shape[1]),
-<<<<<<< HEAD
-                    nn.ReLU(),
-=======
                     nn.Tanhshrink(),
->>>>>>> 532cd3f (nonlinear decoder implementation)
                     nn.Linear(weights.shape[1], weights.shape[0]),
                     nn.Tanhshrink(),
                     nn.Linear(weights.shape[0], weights.shape[0]),
@@ -99,12 +95,9 @@ class Encoder(nn.Module):
                     weights, dtype=torch.float32
                 )
 
-<<<<<<< HEAD
-=======
                 # Initialize linear part using eye-dentity
                 self.model[region][4].weight.data = torch.eye(weights.shape[0])  # type: ignore
 
->>>>>>> 532cd3f (nonlinear decoder implementation)
     def forward(self, X: dict) -> dict[str, torch.Tensor]:
         """
         Forward method for encoder module.
@@ -469,19 +462,6 @@ class mSCA_architecture(nn.Module):
         )
 
         # Initialize the decoder
-<<<<<<< HEAD
-        self.decoder = Decoder(
-            init_decoder,
-            init_decoder_bias,
-            self.n_components,
-            region_sizes,
-            loss_func,
-        )
-
-        # Initializing close to 1 (clamping makes gradient = 0)
-        self.decoder_scaling = nn.Parameter(
-            torch.ones(self.n_components, len(region_sizes)) * 0.99
-=======
         if self.decoder_type == "nonlinear":
             self.decoder = NonlinearDecoder(
                 init_decoder,
@@ -502,7 +482,6 @@ class mSCA_architecture(nn.Module):
             )
         self.decoder_scaling = nn.Parameter(
             torch.ones(self.n_components, len(region_sizes))
->>>>>>> 532cd3f (nonlinear decoder implementation)
         )
 
         # Initialize the convolutional filters
@@ -510,7 +489,6 @@ class mSCA_architecture(nn.Module):
             self.n_components, len(self.region_sizes), filter_length, max_smoothing
         )
 
-<<<<<<< HEAD
         # ### TESTING: unique initialization
         # self.decoder_scaling.data[:20, 1] = 0.1
         # self.decoder_scaling.data[20:, 0] = 0.1
@@ -529,19 +507,6 @@ class mSCA_architecture(nn.Module):
                 grads.append(self.encoder.model[k][2].weight.grad)
 
         return torch.cat(grads, axis=1)
-=======
-        # TESTING: add input bias
-        # self.input_bias_x0 = nn.Parameter(
-        #     torch.zeros(
-        #         100,
-        #     )
-        # )
-        # self.input_bias_x1 = nn.Parameter(
-        #     torch.zeros(
-        #         100,
-        #     )
-        # )
->>>>>>> 532cd3f (nonlinear decoder implementation)
 
     def forward(self, X: dict) -> tuple[
         torch.Tensor,  # latent combined across regions
@@ -595,12 +560,9 @@ class mSCA_architecture(nn.Module):
         # Convolve with region-specific filters
         Z_r_shift = self.filters(Z_r_shift, mode="decode")
 
-<<<<<<< HEAD
-=======
         # Softshrink to allow thresholding of latents for each region
         region_scaling = F.softshrink(self.decoder_scaling)
 
->>>>>>> 532cd3f (nonlinear decoder implementation)
         # Clamp region scalars between -1 and 1
         region_scaling = torch.clamp(self.decoder_scaling, min=-1.0, max=1.0)
 

@@ -1,8 +1,8 @@
-import importlib
 import os
 import numpy as np
 from scipy import io
 import matplotlib.pyplot as plt
+
 from msca import *
 
 
@@ -18,7 +18,12 @@ def load_data(dir_path, f):
     start_idxs = mat_file["mask"]["firstTimeEachCond"][0][0].squeeze() - 1
     end_idxs = mat_file["mask"]["lastTimeEachCond"][0][0].squeeze()
 
-    return data_array, mask, start_idxs, end_idxs
+    # Grab condition related things
+    num_cycles = mask[0][0][1][start_idxs]
+    direction = mask[0][0][2][start_idxs]
+    position = mask[0][0][3][start_idxs]
+
+    return data_array, mask, start_idxs, end_idxs, num_cycles, direction, position
 
 
 # Preprocess the loaded data and split into trials
@@ -61,10 +66,10 @@ def preprocess(data_array, start_idxs, end_idxs, downsample_factor=5):
 if __name__ == "__main__":
     # Load the data
     fp = "./experiments/cycling/data/"
-    m1_data, m1_mask, m1_start_idxs, m1_end_idxs = load_data(
-        f"{fp}", "Drake_interp_cycling_m1_rawRates.mat"
+    m1_data, m1_mask, m1_start_idxs, m1_end_idxs, num_cycles, direction, position = (
+        load_data(f"{fp}", "Drake_interp_cycling_m1_rawRates.mat")
     )
-    sma_data, sma_mask, sma_start_idxs, sma_end_idxs = load_data(
+    sma_data, sma_mask, sma_start_idxs, sma_end_idxs, _, _, _ = load_data(
         f"{fp}", "Drake_interp_cycling_sma_rawRates.mat"
     )
 
@@ -79,54 +84,40 @@ if __name__ == "__main__":
     # Put data into dictionary format
     X = {"M1": m1_preprocessed, "SMA": sma_preprocessed}
 
-    # # Now run mSCA
-    # nonlinear decoder nonlinear encoder, lam_sparse=2.5
-    # msca, losses = mSCA(
-    #     n_components=40,
-    #     n_epochs=10000,
-    #     linear=False,
-    #     loss_func="Gaussian",
-    #     lam_sparse=2.5, # this is set to 0.05 in simulations 
-    #     lam_region=0.0,
-    #     decoder_type="nonlinear",
-    #     decoder_hidden_size=40,
-    #     decoder_activation="GeLU",
-    #     post_hoc_epoch=-1,
-    #     cd_rate=0.5,
-    #     cd_mode="both",
-    # ).fit(X)
+    # X = {"M1": [X["M1"][i] for i in range(4)], "SMA": [X["SMA"][i] for i in range(4)]}
 
-    msca,losses = mSCA(
+    # Now run mSCA
+    msca = mSCA(
         n_components=40,
-        n_epochs=10000,
-        linear=False,
+        n_epochs=1000,  # 00,  # 0,
         loss_func="Gaussian",
-        lam_sparse=2.5, # this is set to 0.05 in simulations 
-        lam_region=0.0,
-        decoder_type="linear",
-        decoder_hidden_size=40,
-        decoder_activation="GeLU",
-        post_hoc_epoch=-1,
+        lam_region=0.5,
+        post_hoc_epoch=-1,  # 1000,
         cd_rate=0.5,
         cd_mode="both",
-        filter_len=41,
-        init="unique",
-        lam_sparse=0.1,
-    ).fit(
-        X
-    )  # , load=True)
+    ).fit(X)
 
+    # Infer latents
+    Z = msca[0].transform(X)
 
-    results_dir = "./experiments/cycling/results"
-    os.makedirs(results_dir, exist_ok=True)
+    # Settings for plotting
+    linestyles = {1: "-", -1: ":"}
+    start_pos = {0.0: "r", 0.5: "b"}
 
-    model_path = os.path.join(results_dir, "msca_cycling_LinearEncoder_LinearDecoder_Sparse2p5.pt")
-    loss_path = os.path.join(results_dir, "losses_LinearEncoder_LinearDecoder_Sparse2p5.npz")
+    # Plot only M1
+    fig, axs = plt.subplots(10, 4, figsize=(10, 7))
 
-    msca.save(model_path)
-    msca.save_losses(losses, loss_path)
+    ymax = np.concatenate(Z["SMA"], axis=0).max()
+    ymin = np.concatenate(Z["SMA"], axis=0).min()
 
-    print(f"Saved model: {model_path}")
-    print(f"Saved losses: {loss_path}")
+    for i in range(20):
+        for j in range(40):
+            axs[j // 4, j % 4].plot(
+                Z["SMA"][i][:, j],
+                c=start_pos[position[i].item()],
+                ls=linestyles[direction[i].item()],
+                alpha=0.5,
+            )
+            axs[j // 4, j % 4].ylim(ymin - 0.1, ymax + 0.1)
 
-  
+    print("something")
