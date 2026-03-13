@@ -12,4 +12,4 @@ cd mSCA
 pip install -e .
 ```
 
-Please see the example jupyter notebook **`quickstart.ipynb`** in the notebooks folder for further details on a simulated dataset. <br>
+__Please see the example jupyter notebook **`quickstart.ipynb`** to get started!__
