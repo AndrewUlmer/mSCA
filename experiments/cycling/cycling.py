@@ -3,6 +3,9 @@ import os
 import numpy as np
 from scipy import io
 import matplotlib.pyplot as plt
+
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+
 from msca import *
 
 
@@ -60,12 +63,13 @@ def preprocess(data_array, start_idxs, end_idxs, downsample_factor=5):
 
 if __name__ == "__main__":
     # Load the data
+    print("Loading data...")
     fp = "./experiments/cycling/data/"
     m1_data, m1_mask, m1_start_idxs, m1_end_idxs = load_data(
-        f"{fp}", "Drake_interp_cycling_m1_rawRates.mat"
+        f"{fp}", "Cousteau_interp_cycling_m1_rawRates.mat"
     )
     sma_data, sma_mask, sma_start_idxs, sma_end_idxs = load_data(
-        f"{fp}", "Drake_interp_cycling_sma_rawRates.mat"
+        f"{fp}", "Cousteau_interp_cycling_sma_rawRates.mat"
     )
 
     # Preprocess the data
@@ -79,31 +83,28 @@ if __name__ == "__main__":
     # Put data into dictionary format
     X = {"M1": m1_preprocessed, "SMA": sma_preprocessed}
 
-    # # Now run mSCA
-    # nonlinear decoder nonlinear encoder, lam_sparse=2.5
-    # msca, losses = mSCA(
-    #     n_components=40,
-    #     n_epochs=10000,
-    #     linear=False,
-    #     loss_func="Gaussian",
-    #     lam_sparse=2.5, # this is set to 0.05 in simulations 
-    #     lam_region=0.0,
-    #     decoder_type="nonlinear",
-    #     decoder_hidden_size=40,
-    #     decoder_activation="GeLU",
-    #     post_hoc_epoch=-1,
-    #     cd_rate=0.5,
-    #     cd_mode="both",
-    # ).fit(X)
+   
+    print("making directories and file paths...")
 
+    results_dir = "./experiments/cycling/results/Cousteau"
+    os.makedirs(results_dir, exist_ok=True)
+
+    model_path = os.path.join(results_dir, "msca_cycling_NonlinearEncoder_NonlinearDecoder_AdaptiveSparse.pt")
+    loss_path = os.path.join(results_dir, "losses_NonlinearEncoder_NonlinearDecoder_AdaptiveSparse.npz")
+
+    print(f"Model will be saved to: {model_path}")
+    print(f"Losses will be saved to: {loss_path}")
+
+    print("Fitting mSCA model...")
     msca,losses = mSCA(
         n_components=40,
         n_epochs=10000,
-        linear=False,
+        linear=False, # nonlinear encoder 
         loss_func="Gaussian",
-        lam_sparse=2.5, # this is set to 0.05 in simulations 
+        lam_sparse="adaptive", # this is set to 0.05 in simulations -> this is not adaptive 
+        #lam_orthog=0.5,
         lam_region=0.0,
-        decoder_type="linear",
+        decoder_type="nonlinear", # nonlinear decoder
         decoder_hidden_size=40,
         decoder_activation="GeLU",
         post_hoc_epoch=-1,
@@ -111,18 +112,14 @@ if __name__ == "__main__":
         cd_mode="both",
         filter_len=41,
         init="unique",
-        lam_sparse=0.1,
+        decoder_init_mode = "pca",
+        #lam_sparse=0.1,
     ).fit(
         X
     )  # , load=True)
 
 
-    results_dir = "./experiments/cycling/results"
-    os.makedirs(results_dir, exist_ok=True)
-
-    model_path = os.path.join(results_dir, "msca_cycling_LinearEncoder_LinearDecoder_Sparse2p5.pt")
-    loss_path = os.path.join(results_dir, "losses_LinearEncoder_LinearDecoder_Sparse2p5.npz")
-
+    
     msca.save(model_path)
     msca.save_losses(losses, loss_path)
 

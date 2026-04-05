@@ -88,6 +88,8 @@ class mSCA:
         Hidden size for the nonlinear decoder (default: 128).
     decoder_activation : str, optional
         Activation for the nonlinear decoder (default: "GeLU").
+    decoder_init_mode : str, optional
+        Initialization mode for nonlinear decoder: "pca" (default) or "random".
 
     TODO:
         - Confirm defaults for hyperparameters (lam_x) work properly
@@ -113,6 +115,7 @@ class mSCA:
         decoder_type: str = "linear",
         decoder_hidden_size: int = 128,
         decoder_activation: str = "GeLU",
+        decoder_init_mode: str = "pca",
         device: str = "cpu",
         cd_mode: str = "both",
         post_hoc_epoch: int = 1000,
@@ -135,10 +138,13 @@ class mSCA:
         self.decoder_type = decoder_type
         self.decoder_hidden_size = decoder_hidden_size
         self.decoder_activation = decoder_activation
+        self.decoder_init_mode = decoder_init_mode
         self.cd_mode = cd_mode
         self.post_hoc_epoch = post_hoc_epoch
         self.balance_interval = balance_interval
         self.init = init
+        # print all the lam_x values
+        print(f"Initialized mSCA with lam_sparse={lam_sparse}, lam_orthog={lam_orthog}, lam_region={lam_region}")
 
     def fit(
         self, X: dict[str, list[np.ndarray]], load: bool = False
@@ -209,6 +215,7 @@ class mSCA:
             decoder_type=self.decoder_type,
             decoder_hidden_size=self.decoder_hidden_size,
             decoder_activation=self.decoder_activation,
+            decoder_init_mode=self.decoder_init_mode,
         )
 
         # Convert input data to dataloader
@@ -519,7 +526,21 @@ class mSCA:
         f : str
             Path to save weights to
         """
-        torch.save(self.model.state_dict(), f)
+        checkpoint = {
+            "state_dict": self.model.state_dict(),
+            "meta": {
+                "lam_sparse": self.lam_sparse,
+                "lam_orthog": self.lam_orthog,
+                "lam_region": self.lam_region,
+                "region_weights": self.region_weights,
+                "n_components": self.n_components,
+                "linear": self.linear,
+                "decoder_type": self.decoder_type,
+                "decoder_hidden_size": self.decoder_hidden_size,
+                "decoder_activation": self.decoder_activation,
+            },
+        }
+        torch.save(checkpoint, f)
 
     def save_losses(self, losses: dict[str, np.ndarray], f: str):
         """
@@ -566,20 +587,28 @@ class mSCA:
         self.n_epochs = 1
         self.fit(X, load=True)
 
-        # if self.decoder_type.lower() == "linear":
-        #     # Switch mSCA's decoder
-        #     pre_decoder_w = self.model.decoder.model.weight.data
-        #     pre_decoder_b = self.model.decoder.model.bias
 
-        #     # Set new decoder
-        #     new_decoder = nn.Linear(*reversed(pre_decoder_w.shape))
-        #     new_decoder.weight.data = pre_decoder_w
-        #     new_decoder.bias.data = pre_decoder_b
-        #     self.model.decoder.model = new_decoder
-
-        # self.model.load_state_dict(torch.load(f))
         # Load checkpoint to current device
-        state_dict = torch.load(f, map_location=self.device)
+        checkpoint = torch.load(f, map_location=self.device)
+
+        # New format: checkpoint with metadata
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+            meta = checkpoint.get("meta", {})
+
+            if meta:
+                print("Checkpoint training hyperparameters:")
+                print(f"  lam_sparse  = {meta.get('lam_sparse')}")
+                print(f"  lam_orthog  = {meta.get('lam_orthog')}")
+                print(f"  lam_region  = {meta.get('lam_region')}")
+                print(f"  region_weights = {meta.get('region_weights')}")
+            else:
+                print("Checkpoint has no saved metadata.")
+
+        # Old format: plain state_dict only
+        else:
+            state_dict = checkpoint
+            print("Old checkpoint format: no saved training lam parameters found.")
 
         # Backward/forward compatibility for linear decoder weight naming
         if self.decoder_type.lower() == "linear":
@@ -593,16 +622,12 @@ class mSCA:
             ckpt_has_param = ckpt_param_key in state_dict
             ckpt_has_plain = ckpt_plain_key in state_dict
 
-            # checkpoint: plain -> model: parametrized
             if model_expects_param and ckpt_has_plain and not ckpt_has_param:
                 state_dict[ckpt_param_key] = state_dict.pop(ckpt_plain_key)
-
-            # checkpoint: parametrized -> model: plain
             elif model_expects_plain and ckpt_has_param and not ckpt_has_plain:
                 state_dict[ckpt_plain_key] = state_dict.pop(ckpt_param_key)
 
         self.model.load_state_dict(state_dict)
-
     def _init_post_hoc(self):
         """
         This function intiailizes a separate optimizer to be used for

@@ -267,6 +267,8 @@ class NonlinearDecoder(nn.Module):
         The hidden size for the nonlinear decoder
     activation : str
         The activation function to use in the nonlinear decoder
+    init_mode : str
+        Decoder initialization mode: "pca" or "random"
     """
 
     def __init__(
@@ -278,6 +280,8 @@ class NonlinearDecoder(nn.Module):
         loss_func: str,
         hidden_size: int = 128,
         activation: str = "GeLU",
+        init_mode: str = "pca",   # "pca" or "random"
+
     ):
         super().__init__()
         self.region_sizes = region_sizes
@@ -308,15 +312,34 @@ class NonlinearDecoder(nn.Module):
         # Initialize
         # If hidden_size == n_components, we can initialize output layer from PCA loadings.
         # Otherwise, PCA loadings do not match output layer shape and we fall back to Xavier init.
-        if self.hidden_size == self.n_components:
-            self.hidden_layer.weight = torch.eye(self.hidden_size, self.n_components, dtype=torch.float32)  # type: ignore
-            V_combined = torch.cat([torch.tensor(v, dtype=torch.float32) for v in init_decoder.values()])
-            self.output_layer.weight = torch.tensor(V_combined, dtype=torch.float32)  # type: ignore
-        else:
-            self.hidden_layer.weight = torch.eye(self.hidden_size, self.n_components, dtype=torch.float32)  # type: ignore
-            w = torch.empty_like(self.output_layer.weight)
+        mode = init_mode.lower()
+        if mode == "pca":
+            if self.hidden_size == self.n_components:
+                self.hidden_layer.weight = torch.eye(self.hidden_size, self.n_components, dtype=torch.float32)  # type: ignore
+                V_combined = torch.cat([torch.tensor(v, dtype=torch.float32) for v in init_decoder.values()])
+                self.output_layer.weight = V_combined.clone().detach().float()  # type: ignore
+            else:
+                self.hidden_layer.weight = torch.eye(self.hidden_size, self.n_components, dtype=torch.float32)  # type: ignore
+                w = torch.empty_like(self.output_layer.weight)
+                nn.init.xavier_uniform_(w)
+                self.output_layer.weight = w
+        elif mode == "random":
+            if self.hidden_size == self.n_components:
+                eps = 1e-3
+                self.hidden_layer.weight = (
+                    torch.eye(self.hidden_size, self.n_components)
+                    + eps * torch.randn(self.hidden_size, self.n_components)
+                ).float()  # type: ignore
+            else:
+                wh = torch.empty_like(self.hidden_layer.weight)
+                nn.init.xavier_uniform_(wh)
+                self.hidden_layer.weight = wh
+
+            w = torch.empty(self.output_layer.weight.shape, dtype=torch.float32)
             nn.init.xavier_uniform_(w)
             self.output_layer.weight = w
+        else:
+            raise ValueError(f"Unknown init_mode='{init_mode}'. Use 'pca' or 'random'.")
 
   
         # Initialize bias
@@ -426,6 +449,8 @@ class mSCA_architecture(nn.Module):
         Hidden size for the nonlinear decoder (used only if decoder_type="nonlinear").
     decoder_activation : str
         Activation for the nonlinear decoder (used only if decoder_type="nonlinear").
+    decoder_init_mode : str
+        Initialization mode for the nonlinear decoder ("pca" or "random").
     filter_length : int
         The width of the convolutional filters used to learn time-delays
     max_smoothing : int
@@ -445,6 +470,7 @@ class mSCA_architecture(nn.Module):
         decoder_type: str = "linear",
         decoder_hidden_size: int = 128,
         decoder_activation: str = "GeLU",
+        decoder_init_mode: str = "pca",
         filter_length: int = 21,
         max_smoothing: int = 10,
     ):
@@ -471,6 +497,7 @@ class mSCA_architecture(nn.Module):
                 loss_func,
                 hidden_size=decoder_hidden_size,
                 activation=decoder_activation,
+                init_mode=decoder_init_mode,
             )
         else:
             self.decoder = Decoder(
