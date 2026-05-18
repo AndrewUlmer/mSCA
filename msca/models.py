@@ -526,8 +526,19 @@ class mSCA:
         f : str
             Path to save weights to
         """
+        # this returns the effective decoder weights 
+        # (after applying decoder scaling and, for nonlinear decoders, the hidden layer) 
+        # on CPU for saving in the checkpoint. This is used for computing the similarity between decoders across models and conditions.
+        effective_decoder = self.model.decoder.effective_weight().cpu()
+        effective_decoder_by_region = {
+            k: v.cpu()
+            for k, v in self.model.decoder.effective_weight(by_region=True).items()
+        }
+
         checkpoint = {
             "state_dict": self.model.state_dict(),
+            "effective_decoder": effective_decoder,
+            "effective_decoder_by_region": effective_decoder_by_region,
             "meta": {
                 "lam_sparse": self.lam_sparse,
                 "lam_orthog": self.lam_orthog,

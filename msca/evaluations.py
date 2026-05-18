@@ -6,7 +6,7 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import r2_score
 from sklearn.linear_model import PoissonRegressor
 from sklearn.multioutput import MultiOutputRegressor
-
+from sklearn.model_selection import KFold
 from .loss_funcs import *
 
 from .models import *
@@ -198,7 +198,7 @@ def pseudo_r2(
 
 
 @torch.no_grad()
-def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
+def evaluate_trial_average_MLP(msca, X_train, X_val, n_splits=5):
     """
     This is used to evaluate a bi-cross-validation fold, when actually
     holding out neurons
@@ -215,6 +215,7 @@ def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
     n_splits : int
         Number of splits to use across time.
     """
+
     # Compute the latents on all the training neurons
     Z = msca.transform(X_train)
 
@@ -222,6 +223,7 @@ def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
     T = np.arange(len(Z[list(Z.keys())[0]]))
 
     # Initialize the KFold object across trials
+    # Using the same random state for each fold to ensure the same splites across different models 
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
 
     # Iterate over the folds
@@ -238,7 +240,7 @@ def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
             k: np.concatenate([v[i] for i in train_index], axis=0) for k, v in Z.items()
         }
 
-        # Grab the latents on testing trials
+        # Grab the latents on testing trials 
         Z_concat_test = {
             k: np.concatenate([v[i] for i in test_index], axis=0) for k, v in Z.items()
         }
@@ -265,7 +267,240 @@ def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
             X_train_heldout_r = X_val_concat_train[k]
             X_test_heldout_r = X_val_concat_test[k]
 
-            # Fit a linear regression model to map from training latents to held-out neurons
+            # Fit a simple MLP model to map from training latents to held-out neurons
+            mlp = MLPRegressor(
+                hidden_layer_sizes=(30,),
+                activation="relu",
+                solver="adam",
+                max_iter=500,
+                random_state=0,
+            )
+            mlp.fit(Z_train, X_train_heldout_r)
+
+
+            # Predict held-out neurons on held-out time-points
+            predictions_r = mlp.predict(Z_test)
+
+            predictions.append(predictions_r)
+            X_test_heldout.append(X_test_heldout_r)
+
+        predictions = np.concatenate(predictions, axis=1)
+        X_test_heldout = np.concatenate(X_test_heldout, axis=1)
+        loss = r2_score(X_test_heldout, predictions, multioutput="variance_weighted")
+        performances_all.append(loss)
+
+    return performances_all
+
+
+
+from sklearn.model_selection import KFold
+from sklearn.neural_network import MLPRegressor
+from sklearn.metrics import r2_score
+import numpy as np
+import torch
+
+
+@torch.no_grad()
+def evaluate_trial_average_MLP_region(msca, X_train, X_val, n_splits=5):
+    """
+    Evaluate reconstruction performance for:
+        1) all regions combined
+        2) M1 only  (fit/predict using only M1 latent + M1 held-out neurons)
+        3) SMA only (fit/predict using only SMA latent + SMA held-out neurons)
+    """
+    Z = msca.transform(X_train)
+    T = np.arange(len(Z[list(Z.keys())[0]]))
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+
+    # import matplotlib.pyplot as _plt
+    # # visualization of Z 
+    # n_components = 40
+    # # there are 20 trails for each region
+    # n_trials = min(20, len(Z['M1']), len(Z['SMA']))
+
+    # # Global y-range across all plotted traces so every subplot uses the same scale
+    # all_vals = []
+    # for j in range(n_trials):
+    #     all_vals.append(Z['M1'][j][:, :n_components].ravel())
+    #     all_vals.append(Z['SMA'][j][:, :n_components].ravel())
+    # all_vals = np.concatenate(all_vals)
+    # ymin, ymax = np.min(all_vals), np.max(all_vals)
+
+    # # Global x-range across all plotted traces
+    # max_t = max(max(Z['M1'][j].shape[0], Z['SMA'][j].shape[0]) for j in range(n_trials))
+
+    # fig, axs = _plt.subplots(10, 4, figsize=(12, 16), sharex=True, sharey=True)
+    # for i in range(n_components): # plot each component in its own subplot
+    #     ax = axs[i // 4, i % 4]
+    #     for j in range(n_trials): # plot 20 trails per region on the same subplot
+    #         ax.plot(Z['M1'][j][:, i], c='r', alpha=0.35)
+    #         ax.plot(Z['SMA'][j][:, i], c='b', alpha=0.35)
+    #     ax.set_xlim(0, max_t - 1)
+    #     ax.set_ylim(ymin, ymax)
+    #     ax.set_title(f'Latent {i + 1}', fontsize=8)
+
+    # _plt.tight_layout()
+    # _plt.show()
+
+    performances_all = []
+    performances_m1 = []
+    performances_sma = []
+
+    for train_index, test_index in kf.split(T):
+        Z_concat_train = {
+            k: np.concatenate([v[i] for i in train_index], axis=0) for k, v in Z.items()
+        }
+        Z_concat_test = {
+            k: np.concatenate([v[i] for i in test_index], axis=0) for k, v in Z.items()
+        }
+        X_val_concat_train = {
+            k: np.concatenate([v[i][msca.trunc] for i in train_index], axis=0)
+            for k, v in X_val.items()
+        }
+        X_val_concat_test = {
+            k: np.concatenate([v[i][msca.trunc] for i in test_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        # --- all regions (concatenate predictions from each region model) ---
+        preds_all, tgts_all = [], []
+        for k in Z_concat_train.keys():
+            mlp = MLPRegressor(
+                hidden_layer_sizes=(30,),
+                activation="relu",
+                solver="adam",
+                max_iter=500,
+                random_state=0,
+            )
+            mlp.fit(Z_concat_train[k], X_val_concat_train[k])
+            pred_k = mlp.predict(Z_concat_test[k])
+
+            preds_all.append(pred_k)
+            tgts_all.append(X_val_concat_test[k])
+
+        r2_all = r2_score(
+            np.concatenate(tgts_all, axis=1),
+            np.concatenate(preds_all, axis=1),
+            multioutput="variance_weighted",
+        )
+        performances_all.append(r2_all)
+
+        # --- M1 only: explicitly use M1 latent/data only ---
+        m1_key = next((k for k in Z_concat_train.keys() if "m1" in k.lower()), None)
+        if m1_key is None:
+            performances_m1.append(np.nan)
+        else:
+            mlp_m1 = MLPRegressor(
+                hidden_layer_sizes=(30,),
+                activation="relu",
+                solver="adam",
+                max_iter=500,
+                random_state=0,
+            )
+            mlp_m1.fit(Z_concat_train[m1_key], X_val_concat_train[m1_key])
+            pred_m1 = mlp_m1.predict(Z_concat_test[m1_key])
+            r2_m1 = r2_score(
+                X_val_concat_test[m1_key],
+                pred_m1,
+                multioutput="variance_weighted",
+            )
+            performances_m1.append(r2_m1)
+
+        # --- SMA only: explicitly use SMA latent/data only ---
+        sma_key = next((k for k in Z_concat_train.keys() if "sma" in k.lower()), None)
+        if sma_key is None:
+            performances_sma.append(np.nan)
+        else:
+            mlp_sma = MLPRegressor(
+                hidden_layer_sizes=(30,),
+                activation="relu",
+                solver="adam",
+                max_iter=500,
+                random_state=0,
+            )
+            mlp_sma.fit(Z_concat_train[sma_key], X_val_concat_train[sma_key])
+            pred_sma = mlp_sma.predict(Z_concat_test[sma_key])
+            r2_sma = r2_score(
+                X_val_concat_test[sma_key],
+                pred_sma,
+                multioutput="variance_weighted",
+            )
+            performances_sma.append(r2_sma)
+
+    return performances_all, performances_m1, performances_sma
+
+
+@torch.no_grad()
+def evaluate_trial_average_Linear(msca, X_train, X_val, n_splits=5):
+    """
+    This is used to evaluate a bi-cross-validation fold, when actually
+    holding out neurons
+
+    Parameters
+    ----------
+    msca : object
+        A trained instantiation of mSCA
+    X_train : dict
+        A dictionary containing neural activity used in the training set. Should
+        be the same format as described in quickstart.ipynb
+    X_val : dict
+        A dictionary containing the neural activity used in the validation set.
+    n_splits : int
+        Number of splits to use across time.
+    """
+
+    # Compute the latents on all the training neurons
+    Z = msca.transform(X_train)
+
+    # Store variable for timepoints
+    T = np.arange(len(Z[list(Z.keys())[0]]))
+
+    # Initialize the KFold object across trials
+    # Using the same random state for each fold to ensure the same splites across different models 
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+
+    # Iterate over the folds
+    performances_all = []  # {k: [] for k in X_train.keys()}
+    for train_index, test_index in kf.split(T):
+
+        X_val_concat = {
+            k: np.concatenate([x[msca.trunc] for x in v], axis=0)
+            for k, v in X_val.items()
+        }
+
+        # Grab the latents on training trials
+        Z_concat_train = {
+            k: np.concatenate([v[i] for i in train_index], axis=0) for k, v in Z.items()
+        }
+
+        # Grab the latents on testing trials 
+        Z_concat_test = {
+            k: np.concatenate([v[i] for i in test_index], axis=0) for k, v in Z.items()
+        }
+
+        # Grab the validation neurons on training trials
+        X_val_concat_train = {
+            k: np.concatenate([v[i][msca.trunc] for i in train_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        # Grab the validation neuron on testing trials
+        X_val_concat_test = {
+            k: np.concatenate([v[i][msca.trunc] for i in test_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        predictions, X_test_heldout = [], []
+        for k in Z_concat_train.keys():
+            # Grab the latents on the training/testing time points
+            Z_train = Z_concat_train[k]
+            Z_test = Z_concat_test[k]
+
+            # # Grab the held-out neurons on the training/testing time points
+            X_train_heldout_r = X_val_concat_train[k]
+            X_test_heldout_r = X_val_concat_test[k]
+
+            # Fit a simple linear regression model to map from training latents to held-out neurons
             lr = LinearRegression()
             lr.fit(Z_train, X_train_heldout_r)
 
@@ -281,6 +516,110 @@ def evaluate_trial_average(msca, X_train, X_val, n_splits=5):
         performances_all.append(loss)
 
     return performances_all
+
+
+
+@torch.no_grad()
+def evaluate_trial_average_Linear_region(msca, X_train, X_val, n_splits=5):
+    """
+    Evaluate reconstruction performance (all / M1 / SMA) using
+    LinearRegression per region.
+    """
+    # Compute latents on all training neurons
+    Z = msca.transform(X_train)
+
+    # Number of trials
+    T = np.arange(len(Z[list(Z.keys())[0]]))
+
+    # Same split across models
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+
+    performances_all = []
+    performances_m1 = []
+    performances_sma = []
+
+    for train_index, test_index in kf.split(T):
+
+        # Latents on training/testing trials
+        Z_concat_train = {
+            k: np.concatenate([v[i] for i in train_index], axis=0)
+            for k, v in Z.items()
+        }
+        Z_concat_test = {
+            k: np.concatenate([v[i] for i in test_index], axis=0)
+            for k, v in Z.items()
+        }
+
+        # Held-out validation neurons on training/testing trials
+        X_val_concat_train = {
+            k: np.concatenate([v[i][msca.trunc] for i in train_index], axis=0)
+            for k, v in X_val.items()
+        }
+        X_val_concat_test = {
+            k: np.concatenate([v[i][msca.trunc] for i in test_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        predictions_all, targets_all = [], []
+        predictions_m1, targets_m1 = [], []
+        predictions_sma, targets_sma = [], []
+
+        for k in Z_concat_train.keys():
+            Z_train = Z_concat_train[k]
+            Z_test = Z_concat_test[k]
+
+            X_train_heldout_r = X_val_concat_train[k]
+            X_test_heldout_r = X_val_concat_test[k]
+
+            # Linear regression instead of MLP
+            lr = LinearRegression()
+            lr.fit(Z_train, X_train_heldout_r)
+            predictions_r = lr.predict(Z_test)
+
+            # all regions
+            predictions_all.append(predictions_r)
+            targets_all.append(X_test_heldout_r)
+
+            # region-specific
+            region_name = k.lower()
+            if "m1" in region_name:
+                predictions_m1.append(predictions_r)
+                targets_m1.append(X_test_heldout_r)
+            elif "sma" in region_name:
+                predictions_sma.append(predictions_r)
+                targets_sma.append(X_test_heldout_r)
+
+        # R2 all regions
+        r2_all = r2_score(
+            np.concatenate(targets_all, axis=1),
+            np.concatenate(predictions_all, axis=1),
+            multioutput="variance_weighted",
+        )
+        performances_all.append(r2_all)
+
+        # R2 M1
+        if len(predictions_m1) > 0:
+            r2_m1 = r2_score(
+                np.concatenate(targets_m1, axis=1),
+                np.concatenate(predictions_m1, axis=1),
+                multioutput="variance_weighted",
+            )
+        else:
+            r2_m1 = np.nan
+        performances_m1.append(r2_m1)
+
+        # R2 SMA
+        if len(predictions_sma) > 0:
+            r2_sma = r2_score(
+                np.concatenate(targets_sma, axis=1),
+                np.concatenate(predictions_sma, axis=1),
+                multioutput="variance_weighted",
+            )
+        else:
+            r2_sma = np.nan
+        performances_sma.append(r2_sma)
+
+    return performances_all, performances_m1, performances_sma
 
 
 @torch.no_grad()

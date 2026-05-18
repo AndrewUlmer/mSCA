@@ -234,6 +234,29 @@ class Decoder(nn.Module):
             d0 = d1
         return rl
 
+    @torch.no_grad()
+    def effective_weight(self, by_region: bool = False):
+        """
+        Returns the learned effective decoder matrix.
+
+        Parameters
+        ----------
+        by_region : bool
+            If True, return a dictionary split by region. Otherwise return the
+            full decoder matrix of shape [total_neurons x n_components].
+        """
+        effective_weight = self.model.weight.detach().clone()
+
+        if not by_region:
+            return effective_weight
+
+        weights, d0 = {}, 0
+        for k, r in self.region_sizes.items():
+            d1 = d0 + r
+            weights[k] = effective_weight[d0:d1]
+            d0 = d1
+        return weights
+
 # decoder function: reconstruct neural data X from latents Z
 # n_components: number of latent dimensions
 # region_sizes: dict with number of neurons per region
@@ -424,6 +447,31 @@ class NonlinearDecoder(nn.Module):
             rl[k] = torch.linalg.norm(effective_weight[d0:d1], axis=0).numpy()
             d0 = d1
         return rl
+
+    @torch.no_grad()
+    def effective_weight(self, by_region: bool = False):
+        """
+        Returns the learned effective decoder matrix for the nonlinear decoder.
+
+        Parameters
+        ----------
+        by_region : bool
+            If True, return a dictionary split by region. Otherwise return the
+            full effective decoder matrix of shape [total_neurons x n_components].
+        """
+        effective_weight = (
+            self.output_layer.weight @ self.hidden_layer.weight
+        ).detach().clone()
+
+        if not by_region:
+            return effective_weight
+
+        weights, d0 = {}, 0
+        for k, r in self.region_sizes.items():
+            d1 = d0 + r
+            weights[k] = effective_weight[d0:d1]
+            d0 = d1
+        return weights
 class mSCA_architecture(nn.Module):
     """
     This is a PyTorch module where the bulk of mSCA's computations are completed

@@ -89,8 +89,8 @@ if __name__ == "__main__":
     results_dir = "./experiments/cycling/results/Cousteau"
     os.makedirs(results_dir, exist_ok=True)
 
-    model_path = os.path.join(results_dir, "msca_cycling_NonlinearEncoder_NonlinearDecoder_AdaptiveSparse.pt")
-    loss_path = os.path.join(results_dir, "losses_NonlinearEncoder_NonlinearDecoder_AdaptiveSparse.npz")
+    model_path = os.path.join(results_dir, "msca_cycling_NonlinearEncoder_NonlinearDecoder_Sparse2p5_LamOrthog0p0_effw.pt")
+    loss_path = os.path.join(results_dir, "losses_NonlinearEncoder_NonlinearDecoder_Sparse2p5_LamOrthog0p0_effw.npz")
 
     print(f"Model will be saved to: {model_path}")
     print(f"Losses will be saved to: {loss_path}")
@@ -98,11 +98,11 @@ if __name__ == "__main__":
     print("Fitting mSCA model...")
     msca,losses = mSCA(
         n_components=40,
-        n_epochs=10000,
+        n_epochs=5000,
         linear=False, # nonlinear encoder 
         loss_func="Gaussian",
-        lam_sparse="adaptive", # this is set to 0.05 in simulations -> this is not adaptive 
-        #lam_orthog=0.5,
+        lam_sparse=2.5, # this is set to 0.05 in simulations -> this is not adaptive 
+        lam_orthog=0.0,
         lam_region=0.0,
         decoder_type="nonlinear", # nonlinear decoder
         decoder_hidden_size=40,
@@ -113,7 +113,7 @@ if __name__ == "__main__":
         filter_len=41,
         init="unique",
         decoder_init_mode = "pca",
-        #lam_sparse=0.1,
+
     ).fit(
         X
     )  # , load=True)
