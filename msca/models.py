@@ -83,13 +83,13 @@ class mSCA:
     cd_rate : float, optional
         Coordinated dropout rate (default: 0.0).
     decoder_type : str, optional
-    Which decoder to use: "linear" (default) or "nonlinear".
+        Which decoder to use: "linear" (default), "nonlinear", or "triple_layer".
     decoder_hidden_size : int, optional
         Hidden size for the nonlinear decoder (default: 128).
     decoder_activation : str, optional
         Activation for the nonlinear decoder (default: "GeLU").
     decoder_init_mode : str, optional
-        Initialization mode for nonlinear decoder: "pca" (default) or "random".
+        Initialization mode for nonlinear/triple_layer decoder: "pca" (default) or "random".
 
     TODO:
         - Confirm defaults for hyperparameters (lam_x) work properly
@@ -121,6 +121,10 @@ class mSCA:
         post_hoc_epoch: int = 1000,
         balance_interval: int = 100,
         init: str = "shared",
+        grad_log_interval: int = 100,
+        lam_sparse_ema: float = 0.3,
+        lam_sparse_max: float = 50.0,
+        sparsity_warmup_epochs: int = 0,
     ):
         self.n_components = n_components
         self.n_epochs = n_epochs
@@ -143,16 +147,20 @@ class mSCA:
         self.post_hoc_epoch = post_hoc_epoch
         self.balance_interval = balance_interval
         self.init = init
+        self.grad_log_interval = grad_log_interval
+        # EMA weight for adaptive lam_sparse update (0 = no update, 1 = no smoothing)
+        self.lam_sparse_ema = lam_sparse_ema
+        # Hard upper bound on adaptive lam_sparse to prevent runaway sparsification
+        self.lam_sparse_max = lam_sparse_max
+        # Number of epochs to train with no sparsity before enabling it
+        self.sparsity_warmup_epochs = sparsity_warmup_epochs
         # print all the lam_x values
-        print(f"Initialized mSCA with lam_sparse={lam_sparse}, lam_orthog={lam_orthog}, lam_region={lam_region}")
-
+        # print(f"Initialized mSCA with lam_sparse={lam_sparse}, lam_orthog={lam_orthog}, lam_region={lam_region}")
     def fit(
         self, X: dict[str, list[np.ndarray]], load: bool = False
-    ) -> tuple[object, dict[str, np.ndarray]]:
-        # Store the names of the regions
+    ) -> tuple[object, dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
         self.region_names = list(X.keys())
 
-        # Compute initial model parameters
         (
             init_encoder,
             init_decoder,
@@ -163,52 +171,37 @@ class mSCA:
             auto_region_weights,
             region_sizes,
         ) = _initialize(
-            X,
-            self.n_components,
-            self.loss_func,
-            self.lam_sparse,
-            self.lam_orthog,
-            self.lam_region,
-            self.init,
+            X, self.n_components, self.loss_func,
+            self.lam_sparse, self.lam_orthog, self.lam_region, self.init,
         )
 
-        # Set hyperparameters to be used during training
         self.region_weights = (
             auto_region_weights if self.region_weights is None else self.region_weights
         )
         print(f"Using region-weights = {auto_region_weights}")
 
-        # Automatically set lam_sparse
         if self.lam_sparse == "adaptive":
             self.lam_sparse_mode = "adaptive"
         else:
             self.lam_sparse = (
-                auto_lam_sparse
-                if self.cd_rate == 0.0
-                else auto_lam_sparse * self.cd_rate
+                auto_lam_sparse if self.cd_rate == 0.0 else auto_lam_sparse * self.cd_rate
             )
             self.lam_sparse_mode = "fixed"
         print(f"Using lam_sparse = {self.lam_sparse}")
 
-        # Automatically set the orthogonality penalty
         self.lam_orthog = (
             auto_lam_orthog if self.cd_rate == 0.0 else auto_lam_orthog * self.cd_rate
         )
         print(f"Using lam_orthog = {self.lam_orthog}")
 
-        # Automatically set the orthogonality penalty
         self.lam_region = (
             auto_lam_region if self.cd_rate == 0.0 else auto_lam_region * self.cd_rate
         )
         print(f"Using lam_region = {self.lam_region}")
 
-        # Instantiate model architecture and set inital params
         self.model = mSCA_architecture(
-            init_encoder,
-            init_decoder,
-            init_decoder_bias,
-            region_sizes,
-            self.n_components,
+            init_encoder, init_decoder, init_decoder_bias,
+            region_sizes, self.n_components,
             linear=self.linear,
             loss_func=self.loss_func,
             filter_length=self.filter_len,
@@ -218,76 +211,91 @@ class mSCA:
             decoder_init_mode=self.decoder_init_mode,
         )
 
-        # Convert input data to dataloader
-        data_loader, _ = convert_to_dataloader(
-            X, batch_size=self.batch_size, shuffle=True
-        )
-
-        # Define optimizer
+        data_loader, _ = convert_to_dataloader(X, batch_size=self.batch_size, shuffle=True)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        self.cd = CoordinatedDropout(self.n_components, self.cd_rate, self.filter_len, mode=self.cd_mode)
 
-        # Make coordinated dropout object
-        self.cd = CoordinatedDropout(
-            self.n_components,
-            self.cd_rate,
-            self.filter_len,
-            mode=self.cd_mode,
-        )
-
-        # Used for truncating trials
         self.trunc = slice(self.filter_len - 1, -self.filter_len + 1)
         self.half_trunc = slice(self.filter_len // 2, -(self.filter_len // 2))
 
-        # Set up loss function
         train_criterion = eval(f"{self.loss_func}_loss".lower())
+        r_loss_f = eval(self.loss_func.lower() + "_f")    # raw loss fn for grad norm logging
 
-        # Initialize loss tracking
         train_loss_dicts = {
-            "reconstruction": [],
-            "latent_sparsity": [],
-            "region_sparsity": [],
-            "orthogonality": [],
-            "total_loss": [],
+            "reconstruction": [], "latent_sparsity": [],
+            "region_sparsity": [], "orthogonality": [], "total_loss": [],
         }
 
+        # Lambda value actually used each epoch (0.0 during warmup)
+        train_lambda_dicts = {"lam_sparse": [], "lam_region": [], "lam_orthog": []}
+
+        # Gradient norms of reconstruction and L1 losses w.r.t. encoder, each epoch
+        train_gradient_dicts = {"r_grad": [], "l1_grad": []}
+
         if not load:
-            # Iterate through training loop
+            self.criterion = train_criterion
+
             for epoch in tqdm(range(self.n_epochs)):
 
-                if epoch < (self.n_epochs - self.post_hoc_epoch):
-                    if (epoch % self.balance_interval == 0) and (
+                # ── Phase 1: Warmup ── reconstruction only, sparsity zeroed ──────
+                if epoch < self.sparsity_warmup_epochs:
+                    _, _, loss_dict = self.loop(data_loader, mode="warmup")
+                    lam_s_used, lam_r_used = 0.0, 0.0
+
+                # ── Phase 2: Main training ── all losses active ───────────────────
+                elif epoch < self.n_epochs - self.post_hoc_epoch:
+                    if (
                         self.lam_sparse_mode == "adaptive"
+                        and (epoch % self.balance_interval == 0
+                            or isinstance(self.lam_sparse, str))
                     ):
-                        new_lam_sparse = self.loop(data_loader, mode="balance-sparsity")
-                        self.lam_sparse = new_lam_sparse
+                        # # if possion function and nonlinear decoder then times 0.1 or times 1
+                        # if self.loss_func.lower() == "poisson" and self.decoder_type.lower() == "nonlinear":
+                        #     self.lam_sparse = float(self.loop(data_loader, mode="balance-sparsity")) * 0.5
+                        # else:
+                        #     self.lam_sparse = float(self.loop(data_loader, mode="balance-sparsity"))
+                        self.lam_sparse = float(self.loop(data_loader, mode="balance-sparsity"))
 
-                    # Training step
-                    self.criterion = train_criterion # the loss function (Gaussian or Poisson) used during the main training period
                     _, _, loss_dict = self.loop(data_loader, mode="train")
+                    lam_s_used = float(self.lam_sparse) if not isinstance(self.lam_sparse, str) else 0.0
+                    lam_r_used = float(self.lam_region)
 
+                # ── Phase 3: Post-hoc scaling ─────────────────────────────────────
                 elif epoch == self.n_epochs - self.post_hoc_epoch:
                     self._init_post_hoc()
+                    _, _, loss_dict = self.loop(data_loader, mode="post-hoc-scaling")
+                    lam_s_used, lam_r_used = 0.0, 0.0
                 else:
                     _, _, loss_dict = self.loop(data_loader, mode="post-hoc-scaling")
+                    lam_s_used, lam_r_used = 0.0, 0.0
 
-                # Store training loss
-                train_loss_dicts["reconstruction"].append(loss_dict["reconstruction"])
-                train_loss_dicts["latent_sparsity"].append(loss_dict["latent_sparsity"])
-                train_loss_dicts["region_sparsity"].append(loss_dict["region_sparsity"])
-                train_loss_dicts["orthogonality"].append(loss_dict["orthogonality"])
-                train_loss_dicts["total_loss"].append(loss_dict["total_loss"])
+                # Record lambda values used this epoch
+                train_lambda_dicts["lam_sparse"].append(lam_s_used)
+                train_lambda_dicts["lam_region"].append(lam_r_used)
+                train_lambda_dicts["lam_orthog"].append(float(self.lam_orthog))
 
-                ## TESTING: recording decoder scaling
+                # Record encoder gradient norms for reconstruction and L1 losses
+                r_grad_norm, l1_grad_norm = self._compute_grad_norms(data_loader, r_loss_f)
+                train_gradient_dicts["r_grad"].append(r_grad_norm)
+                train_gradient_dicts["l1_grad"].append(l1_grad_norm)
+
+                # Store epoch losses
+                for k in ["reconstruction", "latent_sparsity", "region_sparsity",
+                        "orthogonality", "total_loss"]:
+                    train_loss_dicts[k].append(loss_dict[k])
+
                 sims.append(self.model.decoder_scaling.clone().detach().numpy())
 
-            # Concatenate training losses over all epochs
+            # Finalize: convert to numpy arrays and store on self for save()
             train_loss_dicts = {k: np.array(v) for k, v in train_loss_dicts.items()}
+            self.train_lambda_dicts = {k: np.array(v) for k, v in train_lambda_dicts.items()}
+            self.train_gradient_dicts = {k: np.array(v) for k, v in train_gradient_dicts.items()}
 
-            return self, train_loss_dicts
+            return self, train_loss_dicts, self.train_lambda_dicts, self.train_gradient_dicts
 
         else:
-            # This is used to return the initialized model (containers for model exist)
             return self  # type: ignore
+
 
     def _decoder_weight_for_loss(self) -> torch.Tensor:
         """
@@ -295,18 +303,69 @@ class mSCA:
 
         - linear decoder: decoder.model.weight
         - nonlinear decoder: effective decoder matrix output_layer @ hidden_layer
+        - triple_layer decoder: effective decoder matrix layer3 @ layer2 @ layer1
         """
         if self.decoder_type.lower() == "linear":
             return self.model.decoder.model.weight
+        elif self.decoder_type.lower() == "triple_layer":
+            return self.model.decoder.layer3.weight @ self.model.decoder.layer2.weight @ self.model.decoder.layer1.weight
+        else:  # nonlinear
+            hidden_w = self.model.decoder.hidden_layer.weight
+            output_w = self.model.decoder.output_layer.weight
+            return output_w @ hidden_w
 
-        hidden_w = self.model.decoder.hidden_layer.weight
-        output_w = self.model.decoder.output_layer.weight
-        return output_w @ hidden_w
+    def _all_param_grad_norm(self) -> float:
+        return sum(
+            p.grad.data.norm(2).item() ** 2
+            for p in self.model.parameters()
+            if p.grad is not None
+        ) ** 0.5
+
+    def _log_grad_norms(self, data_loader) -> dict[str, float]:
+        """
+        Computes the L2 norm of the gradient of each scaled loss component
+        w.r.t. all model parameters, averaged over batches. Used to diagnose
+        which loss term dominates the parameter update at a given epoch.
+        """
+        r_loss_f = eval(self.loss_func.lower() + "_f")
+        # self.lam_sparse may be a numpy scalar or 0-d torch.Tensor — float() handles all
+        lam_s = float(self.lam_sparse) if not isinstance(self.lam_sparse, str) else 0.0
+        keys = ["reconstruction", "latent_sparsity", "region_sparsity", "orthogonality"]
+        norms = {k: [] for k in keys}
+
+        for _, (X_target, trial_length) in enumerate(data_loader):
+            X_input_masked, X_output_masked, output_mask, Z_mask, _ = self.cd.forward(
+                X_target, trial_length
+            )
+            Z, _, X_reconstruction = self.model(X_input_masked)
+            X_reconstruction_masked = self.cd.mask(
+                X_reconstruction, truncate(output_mask, self.trunc)
+            )
+            Z_masked = self.cd.mask(Z, truncate(Z_mask, self.half_trunc))
+            V = self._decoder_weight_for_loss()
+
+            rc_list = reconstruction_loss(
+                X_reconstruction_masked,
+                truncate(X_output_masked, self.trunc),
+                r_loss_f,
+                mode="train",
+            )
+            scaled_losses = [
+                sum(r * w for r, w in zip(rc_list, self.region_weights.values())),
+                torch.sum(torch.abs(Z_masked)) * lam_s,
+                region_sparsity_loss(Z_masked, self.model.decoder_scaling) * self.lam_region,
+                torch.norm(V.T @ V - torch.eye(V.shape[1], device=V.device)) ** 2 * self.lam_orthog,
+            ]
+
+            for i, (key, loss) in enumerate(zip(keys, scaled_losses)):
+                loss.backward(retain_graph=(i < len(scaled_losses) - 1))
+                norms[key].append(self._all_param_grad_norm())
+                self.optimizer.zero_grad(set_to_none=True)
+        return {k: float(np.mean(v)) for k, v in norms.items()}
 
     def loop(
         self, data_loader: torch.utils.data.DataLoader, mode: str = "train"
-    ) -> tuple[dict[str, list], dict[str, list], dict[str, float]]:
-
+    ) -> tuple:
         # Initialize containers for latents
         latents = {k: [] for k in self.region_names}
         reconstructions = {k: [] for k in self.region_names}
@@ -320,37 +379,44 @@ class mSCA:
             "total_loss": 0.0,
         }
 
-        # Set the reconstruction loss function if post-hoc training
-        if mode in ["post-hoc-scaling", "balance-sparsity"]:
-            r_grads, l1_grads, orth_grads, r_orth_grads = [], [], [], []
-            r_loss_f = eval(self.loss_func.lower() + "_f")
+        r_loss_f = eval(self.loss_func.lower() + "_f")
 
-        # Iterate over trials in the data_loader
+        # Accumulators for balance-sparsity: collect norm per batch, average after loop
+        if mode == "balance-sparsity":
+            r_grads, l1_grads = [], []
+
         for _, (X_target, trial_length) in enumerate(data_loader):
-            # Apply the mask to the inputs and outputs
             X_input_masked, X_output_masked, output_mask, Z_mask, Z_r_mask = (
-                self.cd.forward(
-                    X_target,
-                    trial_length,
-                )
+                self.cd.forward(X_target, trial_length)
             )
 
-            # Forward pass
             Z, Z_r, X_reconstruction = self.model(X_input_masked)
 
-            # Apply the output mask to the reconstructions
             X_reconstruction_masked = self.cd.mask(
                 X_reconstruction, truncate(output_mask, self.trunc)
             )
-
-            # Mask the latents to account for trial length
             Z_masked = self.cd.mask(Z, truncate(Z_mask, self.half_trunc))
 
-            if mode == "train":
-                # get the decoder weight (linear/ nonlinear)
-                decoder_weight = self._decoder_weight_for_loss()
+            # ── Warmup: train with sparsity penalties zeroed ──────────────────
+            if mode == "warmup":
+                loss, loss_dict = self.criterion(
+                    X_reconstruction_masked,
+                    truncate(X_output_masked, self.trunc),
+                    self.region_weights,
+                    Z_masked,
+                    0.0,               # lam_sparse zeroed
+                    0.0,               # lam_region zeroed
+                    self.lam_orthog,
+                    self.model.decoder_scaling,
+                    self._decoder_weight_for_loss(),
+                    mode="train",
+                )
+                loss.backward()
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
 
-                # Compute the loss
+            # ── Train: full losses active ─────────────────────────────────────
+            elif mode == "train":
                 loss, loss_dict = self.criterion(
                     X_reconstruction_masked,
                     truncate(X_output_masked, self.trunc),
@@ -360,40 +426,31 @@ class mSCA:
                     self.lam_region,
                     self.lam_orthog,
                     self.model.decoder_scaling,
-                    decoder_weight,
+                    self._decoder_weight_for_loss(),
                     mode=mode,
                 )
-
-                # Backpropagation and optimizer step (if training)
                 loss.backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
 
-            # during post-hoc scaling
             elif mode == "post-hoc-scaling":
-                # Compute the reconstruction loss
                 r_loss = reconstruction_loss(
-                    X_reconstruction_masked,  # type: ignore
+                    X_reconstruction_masked,
                     truncate(X_output_masked, self.trunc),
                     r_loss_f,
                     mode="train",
                 )
-
-                # Multiply by region weights and sum
                 r_loss = sum(
                     [r_loss[i] * v for i, v in enumerate(self.region_weights.values())]
                 )
                 r_loss.backward()
                 self.optimizer_post_hoc.step()
                 self.optimizer_post_hoc.zero_grad(set_to_none=True)
-
-                # Store the reconstruction loss during the post-hoc period
                 epoch_loss_dict["reconstruction"] += r_loss.item()
 
             elif mode == "balance-sparsity":
-                # Compute the reconstruction loss
                 r_loss = reconstruction_loss(
-                    X_reconstruction_masked,  # type: ignore
+                    X_reconstruction_masked,
                     truncate(X_output_masked, self.trunc),
                     r_loss_f,
                     mode="train",
@@ -401,60 +458,44 @@ class mSCA:
                 r_loss = sum(
                     [r_loss[i] * v for i, v in enumerate(self.region_weights.values())]
                 )
-
-                # Compute the encoder gradient magnitudes
                 r_loss.backward(retain_graph=True)
-
-                # Retrieve grads
                 r_grad = self.model._retrieve_grads()
                 self.optimizer.zero_grad(set_to_none=True)
 
-                # Compute the sparsity loss
                 l1_loss = torch.sum(torch.abs(Z_masked))
-
-                # Compute the encoder gradient magnitudes
                 l1_loss.backward(retain_graph=True)
                 l1_grad = self.model._retrieve_grads()
                 self.optimizer.zero_grad(set_to_none=True)
 
-                # Accumulate gradients over trials
                 r_grads.append(r_grad.norm(p=2))
                 l1_grads.append(l1_grad.norm(p=2))
 
-            # Accumulate loss
-            if mode == "train":
+            # Accumulate losses for warmup and train modes
+            if mode in ["train", "warmup"]:
                 epoch_loss_dict["reconstruction"] += loss_dict["reconstruction"]
                 epoch_loss_dict["latent_sparsity"] += loss_dict["latent_sparsity"]
                 epoch_loss_dict["region_sparsity"] += loss_dict["region_sparsity"]
                 epoch_loss_dict["orthogonality"] += loss_dict["orthogonality"]
                 epoch_loss_dict["total_loss"] += loss.item()
 
-            # Store latents
             if mode == "evaluate":
-                # Mask the post-convolution latents for visualization
                 Z_r_masked = self.cd.mask(Z_r, truncate(Z_r_mask, self.trunc))
-
-                # Append to latents
-                [latents[k].append(Z_r_masked[k].squeeze()) for k in self.region_names]  # type: ignore
-
-                # Append reconstructions
+                [latents[k].append(Z_r_masked[k].squeeze()) for k in self.region_names]
                 [
-                    reconstructions[k].append(X_reconstruction_masked[k].squeeze())  # type: ignore
+                    reconstructions[k].append(X_reconstruction_masked[k].squeeze())
                     for k in self.region_names
                 ]
 
-        if mode in ["train", "evaluate", "post-hoc-scaling"]:
+        # Returns are OUTSIDE the batch loop so all batches are processed
+        if mode in ["train", "warmup", "evaluate", "post-hoc-scaling"]:
             return latents, reconstructions, epoch_loss_dict
 
         elif mode == "balance-sparsity":
-            # Stack gradients for reconstruction and sparsity across trials
             r_grads = torch.stack(r_grads)
             l1_grads = torch.stack(l1_grads)
-
-            # Adjust lam_sparse to match reconstruction learning rate
             lam_sparse = r_grads.mean() / l1_grads.mean()
-
             return lam_sparse
+
 
     @torch.no_grad()
     def transform(
@@ -518,21 +559,9 @@ class mSCA:
         return reconstructions
 
     def save(self, f: str):
-        """
-        Method for saving trained model weights in mSCA
-
-        Parameters
-        ----------
-        f : str
-            Path to save weights to
-        """
-        # this returns the effective decoder weights 
-        # (after applying decoder scaling and, for nonlinear decoders, the hidden layer) 
-        # on CPU for saving in the checkpoint. This is used for computing the similarity between decoders across models and conditions.
         effective_decoder = self.model.decoder.effective_weight().cpu()
         effective_decoder_by_region = {
-            k: v.cpu()
-            for k, v in self.model.decoder.effective_weight(by_region=True).items()
+            k: v.cpu() for k, v in self.model.decoder.effective_weight(by_region=True).items()
         }
 
         checkpoint = {
@@ -550,6 +579,8 @@ class mSCA:
                 "decoder_hidden_size": self.decoder_hidden_size,
                 "decoder_activation": self.decoder_activation,
             },
+            "train_lambda_dicts": getattr(self, "train_lambda_dicts", None),
+            "train_gradient_dicts": getattr(self, "train_gradient_dicts", None),
         }
         torch.save(checkpoint, f)
 
@@ -578,7 +609,7 @@ class mSCA:
 
         Returns
         -------
-        dict[str, np.ndarray]
+        dict[str, np.ndarray]s
             Dictionary of loss curves keyed by loss name.
         """
         with np.load(f, allow_pickle=False) as loaded:
@@ -607,19 +638,19 @@ class mSCA:
             state_dict = checkpoint["state_dict"]
             meta = checkpoint.get("meta", {})
 
-            if meta:
-                print("Checkpoint training hyperparameters:")
-                print(f"  lam_sparse  = {meta.get('lam_sparse')}")
-                print(f"  lam_orthog  = {meta.get('lam_orthog')}")
-                print(f"  lam_region  = {meta.get('lam_region')}")
-                print(f"  region_weights = {meta.get('region_weights')}")
-            else:
-                print("Checkpoint has no saved metadata.")
+            # if meta:
+            #     print("Checkpoint training hyperparameters:")
+            #     print(f"  lam_sparse  = {meta.get('lam_sparse')}")
+            #     print(f"  lam_orthog  = {meta.get('lam_orthog')}")
+            #     print(f"  lam_region  = {meta.get('lam_region')}")
+            #     print(f"  region_weights = {meta.get('region_weights')}")
+            # else:
+            #     print("Checkpoint has no saved metadata.")
 
         # Old format: plain state_dict only
         else:
             state_dict = checkpoint
-            print("Old checkpoint format: no saved training lam parameters found.")
+            # print("Old checkpoint format: no saved training lam parameters found.")
 
         # Backward/forward compatibility for linear decoder weight naming
         if self.decoder_type.lower() == "linear":
@@ -648,6 +679,7 @@ class mSCA:
         # Freeze all model weights
         for param in self.model.parameters():
             param.requires_grad = False
+        
 
         if self.decoder_type.lower() == "linear":
             # Switch mSCA's decoder
@@ -677,3 +709,47 @@ class mSCA:
                     {"params": self.model.decoder.output_layer.parameters(), "lr": 1e-3},
                 ]
             )
+    def _compute_grad_norms(
+        self, data_loader, r_loss_f
+    ) -> tuple[float, float]:
+        """
+        Compute mean gradient norms of reconstruction and L1 losses
+        w.r.t. encoder weights across all batches. Returns (r_grad_norm, l1_grad_norm).
+        Returns (0.0, 0.0) when encoder is frozen (post-hoc phase).
+        """
+        encoder_has_grad = any(p.requires_grad for p in self.model.encoder.parameters())
+        if not encoder_has_grad:
+            return 0.0, 0.0
+
+        r_grads, l1_grads = [], []
+        for _, (X_target, trial_length) in enumerate(data_loader):
+            X_input_masked, X_output_masked, output_mask, Z_mask, Z_r_mask = (
+                self.cd.forward(X_target, trial_length)
+            )
+            Z, Z_r, X_reconstruction = self.model(X_input_masked)
+            X_reconstruction_masked = self.cd.mask(
+                X_reconstruction, truncate(output_mask, self.trunc)
+            )
+            Z_masked = self.cd.mask(Z, truncate(Z_mask, self.half_trunc))
+
+            r_loss = reconstruction_loss(
+                X_reconstruction_masked,
+                truncate(X_output_masked, self.trunc),
+                r_loss_f,
+                mode="train",
+            )
+            r_loss = sum([r_loss[i] * v for i, v in enumerate(self.region_weights.values())])
+            r_loss.backward(retain_graph=True)
+            r_grad = self.model._retrieve_grads()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            l1_loss = torch.sum(torch.abs(Z_masked))
+            l1_loss.backward(retain_graph=True)
+            l1_grad = self.model._retrieve_grads()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            r_grads.append(r_grad.norm(p=2).item())
+            l1_grads.append(l1_grad.norm(p=2).item())
+
+        return float(np.mean(r_grads)), float(np.mean(l1_grads))
+

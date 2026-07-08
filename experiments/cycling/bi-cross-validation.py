@@ -1,7 +1,6 @@
 import os
 import sys
 import shlex
-import argparse
 import linecache
 
 import numpy as np
@@ -110,26 +109,10 @@ def preprocess(data_array, start_idxs, end_idxs, downsample_factor=5):
 
     return split_data
 
-"""
-This is a original script to run bi-cross-validation on the Cousteau cycling data.
-"""
+# """
+# This is a original script to run bi-cross-validation on the Cousteau cycling data.
+# """
 # if __name__ == "__main__":
-#     # Grab parameters passed via cli
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument("--lam_sparse", type=float, required=True)
-#     parser.add_argument("--n_components", type=int, required=True)
-
-#     # Set the experiment path
-#     experiment_path = "./experiments/cycling/bi-cross-validation-sparsity-both/"
-#     param_path = "params.txt"
-
-#     # Read the specific parameters from the text file
-#     file_args = get_params_by_id(experiment_path + param_path)
-
-#     # Load them in and convert to dictionary
-#     args = parser.parse_args(file_args)
-#     args = vars(args)
-
 #     # Load the data
 #     fp = "./experiments/cycling/data/"
 #     m1_data, m1_mask, m1_start_idxs, m1_end_idxs = load_data(
@@ -140,7 +123,8 @@ This is a original script to run bi-cross-validation on the Cousteau cycling dat
 #     )
 
 #     # Set the experiment path
-#     experiment_path = "./experiments/cycling/bi-cross-validation-sparsity-both/"
+#     experiment_path = "./experiments/cycling/results/Cousteau/bi-cross-validation-sparsity/no_sparsity/"
+#     os.makedirs(experiment_path, exist_ok=True)
 
 #     # Preprocess the data
 #     m1_preprocessed = preprocess(
@@ -154,13 +138,15 @@ This is a original script to run bi-cross-validation on the Cousteau cycling dat
 #     X = {"M1": m1_preprocessed, "SMA": sma_preprocessed}
 
 #     # Load folds for experiment if they don't exist already
-#     if not os.path.exists(f"./{experiment_path}/n_train_splits.pt"):
+#     train_split_path = os.path.join(experiment_path, "n_train_splits.pt")
+#     test_split_path  = os.path.join(experiment_path, "n_test_splits.pt")
+#     if not os.path.exists(train_split_path):
 #         train_idxs, test_idxs = bi_cross_validation_neuron_indices(X, n_splits=5)
-#         torch.save(train_idxs, f"./{experiment_path}/n_train_splits.pt")
-#         torch.save(test_idxs, f"./{experiment_path}/n_test_splits.pt")
+#         torch.save(train_idxs, train_split_path)
+#         torch.save(test_idxs, test_split_path)
 #     else:
-#         train_idxs = torch.load(f"./{experiment_path}/n_train_splits.pt")
-#         test_idxs = torch.load(f"./{experiment_path}/n_test_splits.pt")
+#         train_idxs = torch.load(train_split_path)
+#         test_idxs  = torch.load(test_split_path)
 
 #     # Iterate through the splits
 #     k0 = list(train_idxs.keys())[0]
@@ -169,39 +155,239 @@ This is a original script to run bi-cross-validation on the Cousteau cycling dat
 #         # Grab the neural data using the current training indices
 #         x = {k: [v_i[:, train_idxs[k][i]] for v_i in v] for k, v in X.items()}
 
-#         # Now run mSCA
-#         msca, losses = mSCA(
-#             n_components=40,
-#             n_epochs=10000,
-#             linear=True,
-#             loss_func="Gaussian",
-#             lam_sparse=args["lam_sparse"],
-#             lam_region=0.0,
-#             post_hoc_epoch=1000,
-#             cd_rate=0.5,
-#             cd_mode="both",
-#         ).fit(x)
+#         # Now run mSCA (nonlinear encoder + nonlinear decoder)
+#         # adaptive sparsity with warmup
+#         # no sparsity panelty 
+#         # sweep for lam_sparse values
+#         msca,losses,train_lambda_dicts, train_gradient_dicts = mSCA(
+#         n_components=40,
+#         n_epochs=5000,
+#         linear=False, # nonlinear encoder 
+#         loss_func="Gaussian",
+#         lam_sparse=0.0, # this is set to 0.05 in simulations -> this is not adaptive 
+#         lam_orthog=0.1,
+#         lam_region=0.0,
+#         decoder_type="nonlinear", # nonlinear decoder
+#         decoder_hidden_size=40,
+#         sparsity_warmup_epochs=-1,
+#         decoder_activation="tanh",
+#         post_hoc_epoch=-1,
+#         cd_rate=0.5,
+#         cd_mode="both",
+#         filter_len=41,
+#         init="unique",
+#         decoder_init_mode = "pca",
+
+#     ).fit(x)
 
 #         # Save the mSCA model for the current split
-#         msca.save(f"{experiment_path}msca_{i}.pt")
+#         msca.save(os.path.join(experiment_path, f"msca_split_{i}.pt"))
 
-#     print("something")
+#     print("Done")
 
 
-
-"""
-This is a script to run bi-cross-validation on the Cousteau cycling data to generate a sweep over n_components values for three types of models
-lam_sparse is fixed at 2.5, and lam_region is fixed at 0.0. 
 
 """
+
+This is sweeping over sparsity script to run bi-cross-validation on the Cousteau cycling data.
+"""
+if __name__ == "__main__":
+    lam_sparsity_values = [
+    1e-3,
+    1e-2,
+    1e-1,
+    1,
+    1.5,
+    2,
+    2.5,
+    5,
+    10,
+    15,
+    20,
+    30,
+    40]
+    # Load the data
+    fp = "./experiments/cycling/data/"
+    m1_data, m1_mask, m1_start_idxs, m1_end_idxs = load_data(
+        f"{fp}", "Drake_interp_cycling_m1_rawRates.mat"
+    )
+    sma_data, sma_mask, sma_start_idxs, sma_end_idxs = load_data(
+        f"{fp}", "Drake_interp_cycling_sma_rawRates.mat"
+    )
+
+    # Set the experiment path
+    experiment_path = "./experiments/cycling/results/Drake/bi-cross-validation-sparsity/sweep/"
+    os.makedirs(experiment_path, exist_ok=True)
+
+    # Preprocess the data
+    m1_preprocessed = preprocess(
+        m1_data, m1_start_idxs, m1_end_idxs, downsample_factor=5
+    )
+    sma_preprocessed = preprocess(
+        sma_data, sma_start_idxs, sma_end_idxs, downsample_factor=5
+    )
+
+    # Put data into dictionary format
+    X = {"M1": m1_preprocessed, "SMA": sma_preprocessed}
+
+    # Load folds for experiment if they don't exist already
+    train_split_path = os.path.join(experiment_path, "n_train_splits.pt")
+    test_split_path  = os.path.join(experiment_path, "n_test_splits.pt")
+    if not os.path.exists(train_split_path):
+        train_idxs, test_idxs = bi_cross_validation_neuron_indices(X, n_splits=5)
+        torch.save(train_idxs, train_split_path)
+        torch.save(test_idxs, test_split_path)
+    else:
+        train_idxs = torch.load(train_split_path)
+        test_idxs  = torch.load(test_split_path)
+
+
+    # Iterate through the splits
+    k0 = list(train_idxs.keys())[0]
+
+    for lam_sparsity in lam_sparsity_values:
+        model_dir = os.path.join(experiment_path, f"lam_sparsity_{lam_sparsity}")
+        os.makedirs(model_dir, exist_ok=True)
+
+        for i in range(len(train_idxs[k0])):
+            # Grab the neural data using the current training indices
+            x = {k: [v_i[:, train_idxs[k][i]] for v_i in v] for k, v in X.items()}
+
+            # Now run mSCA (nonlinear encoder + nonlinear decoder)
+            # adaptive sparsity with warmup
+            # no sparsity panelty 
+            # sweep for lam_sparse values
+            msca,losses,train_lambda_dicts, train_gradient_dicts = mSCA(
+            n_components=40,
+            n_epochs=5000,
+            linear=False, # nonlinear encoder 
+            loss_func="Gaussian",
+            lam_sparse=lam_sparsity, # this is set to 0.05 in simulations -> this is not adaptive 
+            lam_orthog=0.1,
+            lam_region=0.0,
+            decoder_type="nonlinear", # nonlinear decoder
+            decoder_hidden_size=40,
+            sparsity_warmup_epochs=-1,
+            decoder_activation="tanh",
+            post_hoc_epoch=-1,
+            cd_rate=0.5,
+            cd_mode="both",
+            filter_len=41,
+            init="unique",
+            decoder_init_mode = "pca",
+
+        ).fit(x)
+
+            # Save the mSCA model for the current split
+            msca.save(os.path.join(model_dir, f"msca_split_{i}.pt"))
+
+    print("Done")
+
+
+
+# """
+# This is a script to run bi-cross-validation on the Cousteau cycling data to generate a sweep over n_components values for three types of models
+# lam_sparse is fixed at 2.5, and lam_region is fixed at 0.0. 
+
+# """
 
 # if __name__ == "__main__":
 #     # Fixed experiment settings
-#     n_components_list = [6,10,16,26, 36, 46, 50]
+#     n_components_list = [10,16,26,36,46,50]
+#     #n_components_list = [10]
 #     lam_sparse = 2.5
+#     lam_orthog=0.1
+#     filter_len=41
 
 #     # Base output path for nonlinear runs
-#     experiment_root = "./experiments/cycling/results/bi-cross-validation-Cousteau-linear-linear-lamsparse-2.5/"
+#     experiment_root = f"./experiments/cycling/results/bi-cross-validation-Cousteau-model-1-longtraining/bi-cross-validation-Cousteau-nonlinear-nonlinear-lamsparse-{lam_sparse}-orthog-{lam_orthog}/"
+#     os.makedirs(experiment_root, exist_ok=True)
+
+#     # Load the data
+#     fp = "./experiments/cycling/data/"
+#     m1_data, m1_mask, m1_start_idxs, m1_end_idxs = load_data(
+#         f"{fp}", "Cousteau_interp_cycling_m1_rawRates.mat"
+#     )
+#     sma_data, sma_mask, sma_start_idxs, sma_end_idxs = load_data(
+#         f"{fp}", "Cousteau_interp_cycling_sma_rawRates.mat"
+#     )
+
+#     # Preprocess the data
+#     m1_preprocessed = preprocess(
+#         m1_data, m1_start_idxs, m1_end_idxs, downsample_factor=5
+#     )
+#     sma_preprocessed = preprocess(
+#         sma_data, sma_start_idxs, sma_end_idxs, downsample_factor=5
+#     )
+
+#     # Put data into dictionary format
+#     X = {"M1": m1_preprocessed, "SMA": sma_preprocessed}
+
+#     # # only fit M1
+#     # X = {"M1": m1_preprocessed}
+#     # Shared fold files
+#     train_split_path = os.path.join(experiment_root, "n_train_splits.pt")
+#     test_split_path = os.path.join(experiment_root, "n_test_splits.pt")
+
+#     # Load folds for experiment if they don't exist already
+#     if not os.path.exists(train_split_path):
+#         train_idxs, test_idxs = bi_cross_validation_neuron_indices(X, n_splits=5)
+#         torch.save(train_idxs, train_split_path)
+#         torch.save(test_idxs, test_split_path)
+#     else:
+#         train_idxs = torch.load(train_split_path)
+#         test_idxs = torch.load(test_split_path)
+
+#     # Iterate through component settings
+#     k0 = list(train_idxs.keys())[0]
+#     for n_components in n_components_list:
+#         model_dir = os.path.join(experiment_root, f"n_components_{n_components}")
+#         os.makedirs(model_dir, exist_ok=True)
+
+#         for i in range(len(train_idxs[k0])):
+#             # Grab the neural data using the current training indices
+#             x = {k: [v_i[:, train_idxs[k][i]] for v_i in v] for k, v in X.items()}
+
+#             # Nonlinear encoder + linear decoder
+#             msca, losses = mSCA(
+#                 n_components=n_components,
+#                 n_epochs=20000,
+#                 linear=False, # nonlinear encoder 
+#                 loss_func="Gaussian",
+#                 lam_sparse=lam_sparse, # this is set to 0.05 in simulations -> this is not adaptive 
+#                 lam_orthog=lam_orthog,
+#                 lam_region=0.0,
+#                 decoder_type="nonlinear", # nonlinear decoder
+#                 decoder_hidden_size=n_components,
+#                 decoder_activation="GeLU",
+#                 post_hoc_epoch=-1,
+#                 cd_rate=0.5,
+#                 cd_mode="both",
+#                 filter_len=filter_len,
+#                 init="unique",
+#             ).fit(x)
+
+#             # Save model and training losses for this split
+#             msca.save(os.path.join(model_dir, f"msca_split_{i}.pt"))
+#             torch.save(losses, os.path.join(model_dir, f"losses_split_{i}.pt"))
+
+#     print("Done.")
+
+# """
+# This is a script to run bi-cross-validation on the Cousteau cycling data to generate a sweep over lam_region values for a nonlinear encoder + nonlinear decoder model
+# lam_sparse is fixed at 2.5, and n_components is fixed at 40 or 70."""
+# 70
+# if __name__ == "__main__":
+#     # Fixed experiment settings
+#     n_components = 70
+#     lam_sparse = 2.5
+#     lam_region_sparse = [0.0, 0.1, 0.3, 0.5, 0.8, 1.0, 1.2, 1.5, 1.8, 2.0, 2.3, 2.5, 2.6, 2.8, 3.0]
+ 
+#     # Base output path
+#     experiment_root = (
+#         "./experiments/cycling/results/"
+#         "bi-cross-validation-Cousteau-nonlinear-nonlinear-lamsparse-2.5-components-70/"
+#     )
 #     os.makedirs(experiment_root, exist_ok=True)
 
 #     # Load the data
@@ -237,11 +423,31 @@ lam_sparse is fixed at 2.5, and lam_region is fixed at 0.0.
 #         train_idxs = torch.load(train_split_path)
 #         test_idxs = torch.load(test_split_path)
 
-#     # Iterate through component settings
+#     # Iterate through region sparsity settings
 #     k0 = list(train_idxs.keys())[0]
-#     for n_components in n_components_list:
-#         model_dir = os.path.join(experiment_root, f"n_components_{n_components}")
+
+#     for lam_region in lam_region_sparse:
+#         lam_region_str = str(lam_region).replace(".", "p")
+#         model_dir = os.path.join(
+#             experiment_root,
+#             f"lam_region_{lam_region_str}",
+#         )
 #         os.makedirs(model_dir, exist_ok=True)
+
+#         # Save config for this sweep value
+#         torch.save(
+#             {
+#                 "n_components": n_components,
+#                 "lam_sparse": lam_sparse,
+#                 "lam_region": lam_region,
+#                 "decoder_type": "nonlinear",
+#                 "linear": False,
+#                 "loss_func": "Gaussian",
+#             },
+#             os.path.join(model_dir, "config.pt"),
+#         )
+
+#         print(f"\n=== lam_region={lam_region} ===")
 
 #         for i in range(len(train_idxs[k0])):
 #             # Grab the neural data using the current training indices
@@ -251,132 +457,26 @@ lam_sparse is fixed at 2.5, and lam_region is fixed at 0.0.
 #             msca, losses = mSCA(
 #                 n_components=n_components,
 #                 n_epochs=5000,
-#                 linear=True, # linear encoder 
+#                 linear=False,
 #                 loss_func="Gaussian",
-#                 lam_sparse=2.5, # this is set to 0.05 in simulations -> this is not adaptive 
+#                 lam_sparse=lam_sparse,
 #                 lam_orthog=0.0,
-#                 lam_region=0.0,
-#                 decoder_type="linear", # linear decoder
-#                 decoder_hidden_size=n_components, # match hidden size to n_components
+#                 lam_region=lam_region,
+#                 decoder_type="nonlinear",
+#                 decoder_hidden_size=n_components,
 #                 decoder_activation="GeLU",
 #                 post_hoc_epoch=-1,
 #                 cd_rate=0.5,
 #                 cd_mode="both",
 #                 filter_len=41,
 #                 init="unique",
-#                 decoder_init_mode = "pca",
+#                 decoder_init_mode="pca",
 #             ).fit(x)
 
 #             # Save model and training losses for this split
 #             msca.save(os.path.join(model_dir, f"msca_split_{i}.pt"))
 #             torch.save(losses, os.path.join(model_dir, f"losses_split_{i}.pt"))
 
+#             print(f"  saved split {i} for lam_region={lam_region}")
+
 #     print("Done.")
-
-"""
-This is a script to run bi-cross-validation on the Cousteau cycling data to generate a sweep over lam_region values for a nonlinear encoder + nonlinear decoder model
-lam_sparse is fixed at 2.5, and n_components is fixed at 40 or 70."""
-70
-if __name__ == "__main__":
-    # Fixed experiment settings
-    n_components = 70
-    lam_sparse = 2.5
-    lam_region_sparse = [0.0, 0.1, 0.3, 0.5, 0.8, 1.0, 1.2, 1.5, 1.8, 2.0, 2.3, 2.5, 2.6, 2.8, 3.0]
- 
-    # Base output path
-    experiment_root = (
-        "./experiments/cycling/results/"
-        "bi-cross-validation-Cousteau-nonlinear-nonlinear-lamsparse-2.5-components-70/"
-    )
-    os.makedirs(experiment_root, exist_ok=True)
-
-    # Load the data
-    fp = "./experiments/cycling/data/"
-    m1_data, m1_mask, m1_start_idxs, m1_end_idxs = load_data(
-        f"{fp}", "Cousteau_interp_cycling_m1_rawRates.mat"
-    )
-    sma_data, sma_mask, sma_start_idxs, sma_end_idxs = load_data(
-        f"{fp}", "Cousteau_interp_cycling_sma_rawRates.mat"
-    )
-
-    # Preprocess the data
-    m1_preprocessed = preprocess(
-        m1_data, m1_start_idxs, m1_end_idxs, downsample_factor=5
-    )
-    sma_preprocessed = preprocess(
-        sma_data, sma_start_idxs, sma_end_idxs, downsample_factor=5
-    )
-
-    # Put data into dictionary format
-    X = {"M1": m1_preprocessed, "SMA": sma_preprocessed}
-
-    # Shared fold files
-    train_split_path = os.path.join(experiment_root, "n_train_splits.pt")
-    test_split_path = os.path.join(experiment_root, "n_test_splits.pt")
-
-    # Load folds for experiment if they don't exist already
-    if not os.path.exists(train_split_path):
-        train_idxs, test_idxs = bi_cross_validation_neuron_indices(X, n_splits=5)
-        torch.save(train_idxs, train_split_path)
-        torch.save(test_idxs, test_split_path)
-    else:
-        train_idxs = torch.load(train_split_path)
-        test_idxs = torch.load(test_split_path)
-
-    # Iterate through region sparsity settings
-    k0 = list(train_idxs.keys())[0]
-
-    for lam_region in lam_region_sparse:
-        lam_region_str = str(lam_region).replace(".", "p")
-        model_dir = os.path.join(
-            experiment_root,
-            f"lam_region_{lam_region_str}",
-        )
-        os.makedirs(model_dir, exist_ok=True)
-
-        # Save config for this sweep value
-        torch.save(
-            {
-                "n_components": n_components,
-                "lam_sparse": lam_sparse,
-                "lam_region": lam_region,
-                "decoder_type": "nonlinear",
-                "linear": False,
-                "loss_func": "Gaussian",
-            },
-            os.path.join(model_dir, "config.pt"),
-        )
-
-        print(f"\n=== lam_region={lam_region} ===")
-
-        for i in range(len(train_idxs[k0])):
-            # Grab the neural data using the current training indices
-            x = {k: [v_i[:, train_idxs[k][i]] for v_i in v] for k, v in X.items()}
-
-            # Nonlinear encoder + nonlinear decoder
-            msca, losses = mSCA(
-                n_components=n_components,
-                n_epochs=5000,
-                linear=False,
-                loss_func="Gaussian",
-                lam_sparse=lam_sparse,
-                lam_orthog=0.0,
-                lam_region=lam_region,
-                decoder_type="nonlinear",
-                decoder_hidden_size=n_components,
-                decoder_activation="GeLU",
-                post_hoc_epoch=-1,
-                cd_rate=0.5,
-                cd_mode="both",
-                filter_len=41,
-                init="unique",
-                decoder_init_mode="pca",
-            ).fit(x)
-
-            # Save model and training losses for this split
-            msca.save(os.path.join(model_dir, f"msca_split_{i}.pt"))
-            torch.save(losses, os.path.join(model_dir, f"losses_split_{i}.pt"))
-
-            print(f"  saved split {i} for lam_region={lam_region}")
-
-    print("Done.")

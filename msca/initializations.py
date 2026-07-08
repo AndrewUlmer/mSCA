@@ -248,7 +248,7 @@ def _compute_lam_sparse(
         Sparsity penalty (lam_sparse) computed relative to the reconstruction loss.
     """
     # print passed value
-    print(f"passed lam_sparse: {pct}")
+    #print(f"passed lam_sparse: {pct}")
     # Compute the L1 norm of the latents
     L_sparse = np.abs(Z).sum()
 
@@ -288,7 +288,7 @@ def _compute_lam_orthog(
         Orthogonality penalty (lam_orthog) computed relative to the reconstruction loss.
     """
     # print passed value
-    print(f"passed lam_orthog: {pct}")
+    #print(f"passed lam_orthog: {pct}")
     # Compute "initial" orthogonality loss estimate
     L_orth = np.sum(n_components * (n_components - 1) * 0.01)
 

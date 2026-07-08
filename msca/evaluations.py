@@ -196,6 +196,189 @@ def pseudo_r2(
 
     return r2
 
+def compute_region_specificity(Z: dict):
+    """
+    Computes the distribution of each latent across
+    brain regions
+    """
+
+    # Concatenate across trials
+    Z_cat = {k: np.concatenate(v, axis=0) for k, v in Z.items()}
+
+    # Stack across regions
+    Z_regions = np.stack(list(Z_cat.values()))
+
+    # Compute within each region
+    Z_var = Z_regions.var(axis=1)
+
+    # Normalize across regions
+    Z_distrib = Z_var / Z_var.sum(axis=0)[None, :]
+
+    return Z_distrib
+
+def compute_thresholded_latents(Z: dict, threshold: float):
+    """
+    If the the mass for a given latent within one region doesn't exceed the
+    threshold, zero it out.
+    """
+
+    # Concatenate across trials
+    Z_cat = {k: np.concatenate(v, axis=0) for k, v in Z.items()}
+
+    # Stack across regions
+    Z_regions = np.stack(list(Z_cat.values()))
+
+    # Compute within each region
+    Z_var = Z_regions.var(axis=(0, 1))
+
+    threshold_indices = Z_var > threshold
+
+    Z_out = {k: [np.zeros_like(v_i) for v_i in v] for k, v in Z.items()}
+    for i, ((k1, v1), (k2, v2)) in enumerate(zip(Z.items(), Z_out.items())):
+        for j in range(len(v1)):
+            v2[j][:, threshold_indices] = v1[j][:, threshold_indices]
+
+    return Z_out
+
+
+
+
+@torch.no_grad()
+class _PoissonMLPRegressor:
+    """
+    Multi-output MLP with log-link to approximate Poisson regression.
+    Trains on log(y + eps) and predicts with exp — equivalent to a
+    log-normal MLE which closely approximates Poisson deviance.
+    """
+    def __init__(self, hidden_layer_sizes=(155,), max_iter=500):
+        self._mlp = MLPRegressor(hidden_layer_sizes=hidden_layer_sizes, max_iter=max_iter)
+        self._eps = 1e-8
+
+    def fit(self, X, y):
+        y_safe = np.maximum(y, self._eps)
+        self._mlp.fit(X, np.log(y_safe))
+        return self
+
+    def predict(self, X):
+        return np.exp(self._mlp.predict(X))
+
+
+def _make_regressor(loss_func: str, regressor: str):
+    """Return the appropriate sklearn regressor given loss_func and regressor type."""
+    if loss_func == "Gaussian":
+        if regressor == "linear":
+            return LinearRegression()
+        elif regressor == "mlp":
+            return MLPRegressor(hidden_layer_sizes=(155,))
+        else:
+            raise ValueError(f"Unknown regressor '{regressor}'. Choose 'linear' or 'mlp'.")
+
+    elif loss_func == "Poisson":
+        if regressor == "linear":
+            # PoissonRegressor requires non-negative targets;
+            # MultiOutputRegressor wraps it for multi-neuron prediction.
+            return MultiOutputRegressor(PoissonRegressor(max_iter=300))
+        elif regressor == "mlp":
+            return _PoissonMLPRegressor(hidden_layer_sizes=(155,))
+        else:
+            raise ValueError(f"Unknown regressor '{regressor}'. Choose 'linear' or 'mlp'.")
+
+    else:
+        raise ValueError(f"Unknown loss_func '{loss_func}'. Choose 'Gaussian' or 'Poisson'.")
+
+
+def evaluate_trial_average(
+    msca, X_train, X_val, loss_func, regressor, n_splits=5, threshold=0.0001
+):
+    """
+    Evaluate a bi-cross-validation fold on held-out neurons.
+
+    Parameters
+    ----------
+    msca : mSCA
+        Trained mSCA model.
+    X_train : dict
+        Neural data for training neurons (same format as mSCA input).
+    X_val : dict
+        Neural data for held-out neurons.
+    loss_func : str
+        "Gaussian" or "Poisson". Selects the decoder used to predict held-out neurons.
+    regressor : str
+        "linear" or "mlp".
+        Gaussian + linear  → LinearRegression
+        Gaussian + mlp     → MLPRegressor
+        Poisson  + linear  → Poisson GLM (MultiOutputRegressor wrapping PoissonRegressor)
+        Poisson  + mlp     → MLP with log-link (_PoissonMLPRegressor)
+    n_splits : int
+        Number of trial-KFold splits.
+    threshold : float
+        Minimum normalized mass for a latent to count in a region.
+
+    Returns
+    -------
+    predictions_container : dict
+        {region: [pred_array_per_trial]}  — same structure as X_val but truncated.
+    """
+    Z = msca.transform(X_train)
+
+    Z_distrib = compute_region_specificity(Z)
+    Z_thresholded = compute_thresholded_latents(Z, threshold)
+
+    T = np.arange(len(Z_thresholded[list(Z_thresholded.keys())[0]]))
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+
+    predictions_container = {
+        k: [np.zeros_like(v_i)[msca.trunc] for v_i in v] for k, v in X_val.items()
+    }
+
+    for train_index, test_index in kf.split(T):
+        Z_concat_train = {
+            k: np.concatenate([v[i] for i in train_index], axis=0)
+            for k, v in Z_thresholded.items()
+        }
+        Z_concat_test = {
+            k: np.concatenate([v[i] for i in test_index], axis=0)
+            for k, v in Z_thresholded.items()
+        }
+        X_val_concat_train = {
+            k: np.concatenate([v[i][msca.trunc] for i in train_index], axis=0)
+            for k, v in X_val.items()
+        }
+        X_val_concat_test = {
+            k: np.concatenate([v[i][msca.trunc] for i in test_index], axis=0)
+            for k, v in X_val.items()
+        }
+
+        for k in Z_concat_train.keys():
+            Z_train = Z_concat_train[k]
+            Z_test  = Z_concat_test[k]
+            X_train_heldout_r = X_val_concat_train[k]
+
+            regression_model = _make_regressor(loss_func, regressor)
+
+            # PoissonRegressor requires y >= 0; shift if needed then un-shift predictions
+            if loss_func == "Poisson" and regressor == "linear":
+                col_min = X_train_heldout_r.min(axis=0, keepdims=True)
+                shift = np.minimum(col_min, 0.0)           # 0 if already non-negative
+                regression_model.fit(Z_train, X_train_heldout_r - shift)
+                predictions_r = regression_model.predict(Z_test) + shift
+            else:
+                regression_model.fit(Z_train, X_train_heldout_r)
+                predictions_r = regression_model.predict(Z_test)
+
+            predictions_r = np.split(
+                predictions_r,
+                np.cumsum([Z[k][i].shape[0] for i in test_index])[:-1],
+                axis=0,
+            )
+            for i, j in enumerate(test_index):
+                predictions_container[k][j] = predictions_r[i]
+
+    return predictions_container
+
+
+
+
 
 @torch.no_grad()
 def evaluate_trial_average_MLP(msca, X_train, X_val, n_splits=5):
@@ -215,7 +398,8 @@ def evaluate_trial_average_MLP(msca, X_train, X_val, n_splits=5):
     n_splits : int
         Number of splits to use across time.
     """
-
+    print("inside evaluate_trial_average_MLP")
+    print("hidden layer size for all regions:", 155)
     # Compute the latents on all the training neurons
     Z = msca.transform(X_train)
 
@@ -269,7 +453,7 @@ def evaluate_trial_average_MLP(msca, X_train, X_val, n_splits=5):
 
             # Fit a simple MLP model to map from training latents to held-out neurons
             mlp = MLPRegressor(
-                hidden_layer_sizes=(30,),
+                hidden_layer_sizes=(155,),
                 activation="relu",
                 solver="adam",
                 max_iter=500,
@@ -345,7 +529,7 @@ def evaluate_trial_average_MLP_region(msca, X_train, X_val, n_splits=5):
     performances_all = []
     performances_m1 = []
     performances_sma = []
-
+    print("hidden layer size for all regions:", 155)
     for train_index, test_index in kf.split(T):
         Z_concat_train = {
             k: np.concatenate([v[i] for i in train_index], axis=0) for k, v in Z.items()
@@ -366,7 +550,7 @@ def evaluate_trial_average_MLP_region(msca, X_train, X_val, n_splits=5):
         preds_all, tgts_all = [], []
         for k in Z_concat_train.keys():
             mlp = MLPRegressor(
-                hidden_layer_sizes=(30,),
+                hidden_layer_sizes=(155,),
                 activation="relu",
                 solver="adam",
                 max_iter=500,

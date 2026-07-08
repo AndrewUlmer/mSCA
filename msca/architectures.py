@@ -321,8 +321,8 @@ class NonlinearDecoder(nn.Module):
         # Set the output size for specifying the decoder dimensionality
         output_size = sum(region_sizes.values())
         # ----- Activation ----- #
-        if self.activation == "gelu":
-            self.act = nn.GELU()
+        if self.activation == "tanh":
+            self.act = nn.Tanh()
         else:
             self.act = nn.GELU()
         # ----- Model ----- #
@@ -472,6 +472,221 @@ class NonlinearDecoder(nn.Module):
             weights[k] = effective_weight[d0:d1]
             d0 = d1
         return weights
+
+
+class TripleLayerDecoder(nn.Module):
+    """
+    TripleLayerDecoder module for mSCA with 3-layer architecture:
+    Z_j [B, T'', C] → Linear(C → C) → Tanh → Linear(C → N_j) → Tanh → Linear(N_j → N_j) → Tanh → X_hat_j [B, T'', N_j]
+    
+    Effective decoder weight: W_eff_j = W3_j @ W2_j @ W1_j
+    Full W_eff = concat_regions(W_eff_j), shape = [N_total, C]
+    Constraint: W_eff^T W_eff ≈ I (orthogonality-like)
+
+    Parameters
+    ----------
+    init_decoder : dict
+        Weights computed from PCA initialization in initializations.py
+    init_decoder_bias : dict
+        Initial bias term computed in initializations.py
+    n_components : int
+        The number of latent factors to use (C)
+    region_sizes : dict
+        A dictionary where the keys are the names of each region and the values
+        are the number of neurons in the corresponding region (N_j per region).
+    loss_func : str
+        The reconstruction loss used to train mSCA. Needed to constrain decoder
+        outputs to all positive values if training on spiking data.
+    init_mode : str
+        Decoder initialization mode: "pca" or "random"
+    """
+
+    def __init__(
+        self,
+        init_decoder: dict,
+        init_decoder_bias: dict,
+        n_components: int,
+        region_sizes: dict,
+        loss_func: str,
+        init_mode: str = "pca",
+    ):
+        super().__init__()
+        self.region_sizes = region_sizes
+        self.loss_func = loss_func
+        self.n_components = n_components
+
+        # Set the cumulative region sizes for setting decoder dimensionality
+        self.cumsum_rs = torch.cumsum(
+            torch.tensor([0] + list(self.region_sizes.values())), dim=0
+        )
+
+        # Set the output size for specifying the decoder dimensionality
+        output_size = sum(region_sizes.values())
+
+        # ----- Layer 1: C → C ----- #
+        layer1 = nn.Linear(n_components, n_components, bias=True)
+        self.layer1 = P.register_parametrization(layer1, "weight", Sphere(dim=0))
+
+        # ----- Layer 2: C → N_j (per region) ----- #
+        # Create region-specific layer 2 outputs
+        layer2 = nn.Linear(n_components, output_size, bias=True)
+        self.layer2 = P.register_parametrization(layer2, "weight", Sphere(dim=0))
+
+        # ----- Layer 3: N_j → N_j (per region) ----- #
+        layer3 = nn.Linear(output_size, output_size, bias=True)
+        self.layer3 = P.register_parametrization(layer3, "weight", Sphere(dim=0))
+
+        # Activation function
+        self.tanh = nn.Tanh()
+
+        # Initialize weights
+        mode = init_mode.lower()
+        if mode == "pca":
+            # Initialize Layer 1 as identity
+            self.layer1.weight = torch.eye(n_components, dtype=torch.float32)  # type: ignore
+            
+            # Initialize Layer 2 with PCA loadings
+            V_combined = torch.cat([torch.tensor(v, dtype=torch.float32) for v in init_decoder.values()])
+            self.layer2.weight = V_combined.clone().detach().float()  # type: ignore
+            
+            # Initialize Layer 3 as identity-like structure per region
+            # For each region, the sub-matrix is initialized to help preserve dimensions
+            w3 = torch.zeros(output_size, output_size, dtype=torch.float32)
+            d0 = 0
+            for region_size in region_sizes.values():
+                d1 = d0 + region_size
+                nn.init.xavier_uniform_(w3[d0:d1, d0:d1])
+                d0 = d1
+            self.layer3.weight = w3  # type: ignore
+        elif mode == "random":
+            # Random initialization with xavier
+            w1 = torch.empty(n_components, n_components, dtype=torch.float32)
+            nn.init.xavier_uniform_(w1)
+            self.layer1.weight = w1  # type: ignore
+            
+            w2 = torch.empty(output_size, n_components, dtype=torch.float32)
+            nn.init.xavier_uniform_(w2)
+            self.layer2.weight = w2  # type: ignore
+            
+            w3 = torch.empty(output_size, output_size, dtype=torch.float32)
+            nn.init.xavier_uniform_(w3)
+            self.layer3.weight = w3  # type: ignore
+        else:
+            raise ValueError(f"Unknown init_mode='{init_mode}'. Use 'pca' or 'random'.")
+
+        # Initialize biases
+        self.layer1.bias.data = torch.zeros(n_components, dtype=torch.float32)
+        self.layer2.bias.data = torch.cat(
+            [torch.tensor(v, dtype=torch.float32) for v in init_decoder_bias.values()],
+            axis=1,
+        ).squeeze()  # type: ignore
+        self.layer3.bias.data = torch.zeros(output_size, dtype=torch.float32)
+
+    def forward(self, Z: dict) -> dict[str, torch.Tensor]:
+        """
+        Forward method for the triple-layer decoder
+        
+        For each region j:
+        Z_j [B, T, C] → Layer1 (C→C) → Tanh → Layer2_j (C→N_j) → Tanh → Layer3_j (N_j→N_j) → Tanh → X_hat_j
+
+        Parameters
+        ----------
+        Z : dict
+            A dictionary where the keys are region names and the values are
+            tensors of shape [batch_size x time-points (truncated) x n_components]
+
+        Returns
+        -------
+        X_reconstruction : dict
+            A dictionary where the keys are region names and the values are tensors
+            of shape [batch_size x time-points (truncated) x N_j] where N_j is the
+            number of neurons in region j.
+        """
+        target_dtype = self.layer1.weight.dtype
+        target_device = self.layer1.weight.device
+
+        # Pre-compute region-keys and indices
+        if not hasattr(self, "region_to_idx"):
+            self.region_to_idx = {k: i for i, k in enumerate(Z.keys())}
+
+        # Process each region through the three-layer network
+        X_reconstruction = {}
+        for k in Z.keys():
+            i = self.region_to_idx[k]
+            z_j = Z[k].to(device=target_device, dtype=target_dtype)  # [B, T, C]
+            
+            # Layer 1: C → C with Tanh (shared across regions)
+            h1_j = self.tanh(F.linear(z_j, self.layer1.weight, self.layer1.bias))  # [B, T, C]
+            
+            # Layer 2: C → N_j with Tanh (region-specific via weight indexing)
+            start_idx, end_idx = self.cumsum_rs[i], self.cumsum_rs[i + 1]
+            W2_j = self.layer2.weight[start_idx:end_idx]  # [N_j, C]
+            b2_j = self.layer2.bias[start_idx:end_idx]    # [N_j]
+            h2_j = self.tanh(F.linear(h1_j, W2_j, b2_j))  # [B, T, N_j]
+            
+            # Layer 3: N_j → N_j with Tanh (region-specific via weight indexing)
+            W3_j = self.layer3.weight[start_idx:end_idx, start_idx:end_idx]  # [N_j, N_j]
+            b3_j = self.layer3.bias[start_idx:end_idx]    # [N_j]
+            h3_j = self.tanh(F.linear(h2_j, W3_j, b3_j))  # [B, T, N_j]
+            
+            X_reconstruction[k] = h3_j
+
+            # Apply Poisson constraint if needed
+            if self.loss_func == "Poisson":
+                X_reconstruction[k] = F.softplus(X_reconstruction[k], beta=5.0)
+
+        return X_reconstruction
+
+    @torch.no_grad()
+    def r_loadings(self) -> dict[str, np.ndarray]:
+        """
+        Computes the region-specific loading from the effective decoder matrix.
+        W_eff_j = W3_j @ W2_j @ W1_j
+
+        Returns
+        ----------
+        rl : dict
+            Keys are region names and values are numpy arrays of L2 norm of region-specific
+            portion of effective decoder loading for each region.
+        """
+        # Compute effective decoder weight: W3 @ W2 @ W1
+        # This gives shape (N_total, C)
+        w_eff = self.layer3.weight @ self.layer2.weight @ self.layer1.weight
+        
+        rl, d0, d1 = {}, 0, 0
+        for k, r in self.region_sizes.items():
+            d1 = d0 + r
+            rl[k] = torch.linalg.norm(w_eff[d0:d1], axis=0).numpy()
+            d0 = d1
+        return rl
+
+    @torch.no_grad()
+    def effective_weight(self, by_region: bool = False):
+        """
+        Returns the learned effective decoder matrix for the triple-layer decoder.
+        W_eff_j = W3_j @ W2_j @ W1_j
+        W_eff = concat_regions(W_eff_j), shape = [N_total, C]
+
+        Parameters
+        ----------
+        by_region : bool
+            If True, return a dictionary split by region. Otherwise return the
+            full effective decoder matrix of shape [total_neurons x n_components].
+        """
+        # Compute W_eff = W3 @ W2 @ W1, shape [N_total, C]
+        w_eff = (self.layer3.weight @ self.layer2.weight @ self.layer1.weight).detach().clone()
+
+        if not by_region:
+            return w_eff
+
+        weights, d0 = {}, 0
+        for k, r in self.region_sizes.items():
+            d1 = d0 + r
+            weights[k] = w_eff[d0:d1]
+            d0 = d1
+        return weights
+
+
 class mSCA_architecture(nn.Module):
     """
     This is a PyTorch module where the bulk of mSCA's computations are completed
@@ -536,7 +751,16 @@ class mSCA_architecture(nn.Module):
         )
 
         # Initialize the decoder
-        if self.decoder_type == "nonlinear":
+        if self.decoder_type == "triple_layer":
+            self.decoder = TripleLayerDecoder(
+                init_decoder,
+                init_decoder_bias,
+                self.n_components,
+                region_sizes,
+                loss_func,
+                init_mode=decoder_init_mode,
+            )
+        elif self.decoder_type == "nonlinear":
             self.decoder = NonlinearDecoder(
                 init_decoder,
                 init_decoder_bias,
@@ -647,4 +871,4 @@ class mSCA_architecture(nn.Module):
         # Reconstruct the input data
         X_reconstruction = self.decoder(Z_r)
 
-        return Z, Z_r, X_reconstruction  # type: ignore
+        return Z, Z_r, X_reconstruction  

@@ -60,7 +60,7 @@ def preprocess(data_array, start_idxs, end_idxs, downsample_factor=5):
 
     return split_data
 
-
+#cousteau for one run
 if __name__ == "__main__":
     # Load the data
     print("Loading data...")
@@ -89,24 +89,28 @@ if __name__ == "__main__":
     results_dir = "./experiments/cycling/results/Cousteau"
     os.makedirs(results_dir, exist_ok=True)
 
-    model_path = os.path.join(results_dir, "msca_cycling_NonlinearEncoder_NonlinearDecoder_Sparse2p5_LamOrthog0p0_effw.pt")
-    loss_path = os.path.join(results_dir, "losses_NonlinearEncoder_NonlinearDecoder_Sparse2p5_LamOrthog0p0_effw.npz")
+    model_path = os.path.join(results_dir, "msca_nonlinearDecoder_gradient_adaptive_tanh_warmup_2.5_new.pt") # 100
+    loss_path = os.path.join(results_dir, "losses_nonlinearDecoder_gradient_adaptive_tanh_warmup_2.5_new.npz")
+
+    # model_path = os.path.join(results_dir, "msca_nonlinearDecoder_gradient_2.5_tanh_new.pt")
+    # loss_path = os.path.join(results_dir, "losses_nonlinearDecoder_gradient_2.5_tanh_new.npz")
 
     print(f"Model will be saved to: {model_path}")
     print(f"Losses will be saved to: {loss_path}")
 
     print("Fitting mSCA model...")
-    msca,losses = mSCA(
+    msca,losses,train_lambda_dicts, train_gradient_dicts = mSCA(
         n_components=40,
         n_epochs=5000,
         linear=False, # nonlinear encoder 
         loss_func="Gaussian",
-        lam_sparse=2.5, # this is set to 0.05 in simulations -> this is not adaptive 
-        lam_orthog=0.0,
+        lam_sparse="adaptive", # this is set to 0.05 in simulations -> this is not adaptive 
+        lam_orthog=0.1,
         lam_region=0.0,
         decoder_type="nonlinear", # nonlinear decoder
         decoder_hidden_size=40,
-        decoder_activation="GeLU",
+        sparsity_warmup_epochs=100,
+        decoder_activation="tanh",
         post_hoc_epoch=-1,
         cd_rate=0.5,
         cd_mode="both",
@@ -114,10 +118,7 @@ if __name__ == "__main__":
         init="unique",
         decoder_init_mode = "pca",
 
-    ).fit(
-        X
-    )  # , load=True)
-
+    ).fit(X)
 
     
     msca.save(model_path)
@@ -125,5 +126,74 @@ if __name__ == "__main__":
 
     print(f"Saved model: {model_path}")
     print(f"Saved losses: {loss_path}")
+
+  
+# sweep over orthog for Drake 
+
+
+# if __name__ == "__main__":
+#     # Load the data
+#     print("Loading data...")
+#     fp = "./experiments/cycling/data/"
+#     m1_data, m1_mask, m1_start_idxs, m1_end_idxs = load_data(
+#         f"{fp}", "Drake_interp_cycling_m1_rawRates.mat"
+#     )
+#     sma_data, sma_mask, sma_start_idxs, sma_end_idxs = load_data(
+#         f"{fp}", "Drake_interp_cycling_sma_rawRates.mat"
+#     )
+
+#     # Preprocess the data
+#     m1_preprocessed = preprocess(
+#         m1_data, m1_start_idxs, m1_end_idxs, downsample_factor=5
+#     )
+#     sma_preprocessed = preprocess(
+#         sma_data, sma_start_idxs, sma_end_idxs, downsample_factor=5
+#     )
+
+#     # Put data into dictionary format
+#     X = {"M1": m1_preprocessed, "SMA": sma_preprocessed}
+
+#     print("making directories and file paths...")
+
+#     results_dir = "./experiments/cycling/results/Drake/nonlinear-nonlinear-sweeping_lam_orthog"
+#     os.makedirs(results_dir, exist_ok=True)
+
+#     # Sweep over a few orthogonality settings for the nonlinear/nonlinear model.
+#     lam_orthog_values = [0.0, 0.05, 0.1,0.3, 0.5, 1.0, 2.0, 5.0]
+
+
+#     for lam_orthog in lam_orthog_values:
+#         lam_tag = str(lam_orthog).replace(".", "p")
+#         model_path = os.path.join(results_dir, f"msca_nonlinear_nonlinear_lamOrthog_{lam_tag}.pt")
+#         loss_path = os.path.join(results_dir, f"losses_nonlinear_nonlinear_lamOrthog_{lam_tag}.npz")
+
+#         print("\n" + "=" * 80)
+#         print(f"Fitting nonlinear/nonlinear mSCA for lam_orthog={lam_orthog}")
+#         print(f"Model will be saved to: {model_path}")
+#         print(f"Losses will be saved to: {loss_path}")
+
+#         msca, losses = mSCA(
+#             n_components=40,
+#             n_epochs=5000,
+#             linear=False, # nonlinear encoder
+#             loss_func="Gaussian",
+#             lam_sparse=2.5,
+#             lam_orthog=lam_orthog,
+#             lam_region=0.0,
+#             decoder_type="nonlinear",
+#             decoder_hidden_size=40,
+#             decoder_activation="GeLU",
+#             post_hoc_epoch=-1,
+#             cd_rate=0.5,
+#             cd_mode="both",
+#             filter_len=41,
+#             init="unique",
+#         ).fit(X)
+
+#         msca.save(model_path)
+#         msca.save_losses(losses, loss_path)
+
+#         print(f"Saved model: {model_path}")
+#         print(f"Saved losses: {loss_path}")
 
   
