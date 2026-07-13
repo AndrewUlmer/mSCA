@@ -7,9 +7,45 @@ from sklearn.metrics import r2_score
 from sklearn.linear_model import PoissonRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.model_selection import KFold
+
+
+
 from .loss_funcs import *
 
 from .models import *
+def pseudo_r2(
+    X_target: torch.Tensor, predictions: torch.Tensor, mean_fr: torch.Tensor
+) -> float:
+    """
+    This function will compute the pseudo r2 using the NLL from the Poisson
+    distribution
+
+    Parameters
+    ----------
+    X_target : torch.Tensor
+        The neural activity being reconstructed, concatenated across time and regions
+    predictions : torch.Tensor
+        The predictions made by mSCA's decoder, again concatenated across time and regions
+    mean_fr : torch.Tensor
+        The mean firing-rate of each neuron computed across all trials. Used to compute
+        the negative log-likelihood for the null model
+
+    """
+    # Compute negative log-likelihood for saturated model
+    sat_nll = poisson_f(X_target, X_target)
+
+    # Compute the null negative log-likelihood
+    null_nll = poisson_f(mean_fr, X_target)
+
+    # Compute the actual negative log-likelihood
+    nll = poisson_f(predictions, X_target)
+
+    # Compute the pseudo-r2 - note these are NLLs
+    D_model = nll.sum() - sat_nll.sum()
+    D_null = null_nll.sum() - sat_nll.sum()
+    r2 = 1 - (D_model / D_null)
+
+    return r2
 
 
 def sparsity_sweep_bootstrap(
@@ -162,40 +198,6 @@ def bootstrap_performances(
     return np.array(bootstrapped_r2s)
 
 
-def pseudo_r2(
-    X_target: torch.Tensor, predictions: torch.Tensor, mean_fr: torch.Tensor
-) -> float:
-    """
-    This function will compute the pseudo r2 using the NLL from the Poisson
-    distribution
-
-    Parameters
-    ----------
-    X_target : torch.Tensor
-        The neural activity being reconstructed, concatenated across time and regions
-    predictions : torch.Tensor
-        The predictions made by mSCA's decoder, again concatenated across time and regions
-    mean_fr : torch.Tensor
-        The mean firing-rate of each neuron computed across all trials. Used to compute
-        the negative log-likelihood for the null model
-
-    """
-    # Compute negative log-likelihood for saturated model
-    sat_nll = poisson_f(X_target, X_target)
-
-    # Compute the null negative log-likelihood
-    null_nll = poisson_f(mean_fr, X_target)
-
-    # Compute the actual negative log-likelihood
-    nll = poisson_f(predictions, X_target)
-
-    # Compute the pseudo-r2 - note these are NLLs
-    D_model = nll.sum() - sat_nll.sum()
-    D_null = null_nll.sum() - sat_nll.sum()
-    r2 = 1 - (D_model / D_null)
-
-    return r2
-
 def compute_region_specificity(Z: dict):
     """
     Computes the distribution of each latent across
@@ -243,139 +245,450 @@ def compute_thresholded_latents(Z: dict, threshold: float):
 
 
 
-@torch.no_grad()
-class _PoissonMLPRegressor:
+
+def pseudo_r2(
+    X_target: torch.Tensor, predictions: torch.Tensor, mean_fr: torch.Tensor
+) -> float:
     """
-    Multi-output MLP with log-link to approximate Poisson regression.
-    Trains on log(y + eps) and predicts with exp — equivalent to a
-    log-normal MLE which closely approximates Poisson deviance.
-    """
-    def __init__(self, hidden_layer_sizes=(155,), max_iter=500):
-        self._mlp = MLPRegressor(hidden_layer_sizes=hidden_layer_sizes, max_iter=max_iter)
-        self._eps = 1e-8
-
-    def fit(self, X, y):
-        y_safe = np.maximum(y, self._eps)
-        self._mlp.fit(X, np.log(y_safe))
-        return self
-
-    def predict(self, X):
-        return np.exp(self._mlp.predict(X))
-
-
-def _make_regressor(loss_func: str, regressor: str):
-    """Return the appropriate sklearn regressor given loss_func and regressor type."""
-    if loss_func == "Gaussian":
-        if regressor == "linear":
-            return LinearRegression()
-        elif regressor == "mlp":
-            return MLPRegressor(hidden_layer_sizes=(155,))
-        else:
-            raise ValueError(f"Unknown regressor '{regressor}'. Choose 'linear' or 'mlp'.")
-
-    elif loss_func == "Poisson":
-        if regressor == "linear":
-            # PoissonRegressor requires non-negative targets;
-            # MultiOutputRegressor wraps it for multi-neuron prediction.
-            return MultiOutputRegressor(PoissonRegressor(max_iter=300))
-        elif regressor == "mlp":
-            return _PoissonMLPRegressor(hidden_layer_sizes=(155,))
-        else:
-            raise ValueError(f"Unknown regressor '{regressor}'. Choose 'linear' or 'mlp'.")
-
-    else:
-        raise ValueError(f"Unknown loss_func '{loss_func}'. Choose 'Gaussian' or 'Poisson'.")
-
-
-def evaluate_trial_average(
-    msca, X_train, X_val, loss_func, regressor, n_splits=5, threshold=0.0001
-):
-    """
-    Evaluate a bi-cross-validation fold on held-out neurons.
+    Compute pseudo R2 using the NLL from the Poisson distribution.
 
     Parameters
     ----------
-    msca : mSCA
-        Trained mSCA model.
-    X_train : dict
-        Neural data for training neurons (same format as mSCA input).
-    X_val : dict
-        Neural data for held-out neurons.
+    X_target : torch.Tensor
+        Ground-truth neural activity.
+    predictions : torch.Tensor
+        Predicted neural activity.
+    mean_fr : torch.Tensor
+        Mean firing-rate used as the null model.
+    """
+    # Saturated model NLL
+    sat_nll = poisson_f(X_target, X_target)
+
+    # Null model NLL
+    null_nll = poisson_f(mean_fr, X_target)
+
+    # Actual model NLL
+    nll = poisson_f(predictions, X_target)
+
+    # Pseudo-R2
+    D_model = nll.sum() - sat_nll.sum()
+    D_null = null_nll.sum() - sat_nll.sum()
+
+    r2 = 1 - (D_model / D_null)
+
+    return r2
+
+
+class PoissonRegressorWrapper:
+    """
+    Multi-output Poisson GLM wrapper.
+
+    This is used for:
+        loss_func == "poisson"
+        decoder_type == "linear"
+    """
+
+    def __init__(self, alpha=1e-4):
+        self.alpha = alpha
+
+    def fit(self, Z, X):
+        regressor = PoissonRegressor(
+            alpha=self.alpha,
+            solver="newton-cholesky",
+        )
+        self.model = MultiOutputRegressor(regressor)
+        self.model.fit(Z, X.astype("float32"))
+        return self
+
+    def predict(self, Z):
+        return self.model.predict(Z)
+
+
+def build_decoder(
+    loss_func,
+    decoder_type,
+    hidden_layer_sizes=(155,),
+    max_iter=500,
+    random_state=0,
+    poisson_alpha=1e-4,
+):
+    """
+    Build decoder according to loss function and decoder type.
+
+    Parameters
+    ----------
     loss_func : str
-        "Gaussian" or "Poisson". Selects the decoder used to predict held-out neurons.
-    regressor : str
-        "linear" or "mlp".
-        Gaussian + linear  → LinearRegression
-        Gaussian + mlp     → MLPRegressor
-        Poisson  + linear  → Poisson GLM (MultiOutputRegressor wrapping PoissonRegressor)
-        Poisson  + mlp     → MLP with log-link (_PoissonMLPRegressor)
+        "poisson" or "gaussian"
+    decoder_type : str
+        "linear" or "nonlinear"
+    """
+
+    loss_func = loss_func.lower()
+    decoder_type = decoder_type.lower()
+
+    if loss_func == "poisson":
+        if decoder_type == "linear":
+            # Poisson GLM decoder
+            return PoissonRegressorWrapper(alpha=poisson_alpha)
+
+        elif decoder_type == "nonlinear":
+            # Nonlinear Poisson decoder
+            return MLPRegressor(
+                hidden_layer_sizes=hidden_layer_sizes,
+                activation="relu",
+                solver="adam",
+                loss="poisson",
+                max_iter=max_iter,
+                random_state=random_state,
+            )
+
+        else:
+            raise ValueError(
+                f"Unknown decoder_type={decoder_type}. "
+                "Use 'linear' or 'nonlinear'."
+            )
+
+    elif loss_func == "gaussian":
+        if decoder_type == "linear":
+            # Linear Gaussian decoder
+            return LinearRegression()
+
+        elif decoder_type == "nonlinear":
+            # Nonlinear Gaussian decoder
+            return MLPRegressor(
+                hidden_layer_sizes=hidden_layer_sizes,
+                activation="relu",
+                solver="adam",
+                max_iter=max_iter,
+                random_state=random_state,
+            )
+
+        else:
+            raise ValueError(
+                f"Unknown decoder_type={decoder_type}. "
+                "Use 'linear' or 'nonlinear'."
+            )
+
+    else:
+        raise ValueError(
+            f"Unknown loss_func={loss_func}. "
+            "Use 'poisson' or 'gaussian'."
+        )
+
+
+def compute_score(
+    loss_func,
+    X_test_heldout,
+    predictions,
+    mean_fr=None,
+    eps=1e-8,
+):
+    """
+    Compute evaluation metric.
+
+    For Poisson:
+        use pseudo R2.
+
+    For Gaussian:
+        use variance-weighted R2.
+    """
+
+    loss_func = loss_func.lower()
+
+    if loss_func == "poisson":
+        if mean_fr is None:
+            raise ValueError("mean_fr is required when loss_func='poisson'.")
+
+        # Poisson rate predictions must be positive
+        predictions = np.clip(predictions, eps, None)
+        mean_fr = np.clip(mean_fr, eps, None)
+
+        X_test_tensor = torch.tensor(X_test_heldout, dtype=torch.float32)
+        pred_tensor = torch.tensor(predictions, dtype=torch.float32)
+        mean_fr_tensor = torch.tensor(mean_fr, dtype=torch.float32)
+
+        score = pseudo_r2(
+            X_target=X_test_tensor,
+            predictions=pred_tensor,
+            mean_fr=mean_fr_tensor,
+        )
+
+        if isinstance(score, torch.Tensor):
+            score = score.detach().cpu().item()
+
+        return float(score)
+
+    elif loss_func == "gaussian":
+        return r2_score(
+            X_test_heldout,
+            predictions,
+            multioutput="variance_weighted",
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown loss_func={loss_func}. "
+            "Use 'poisson' or 'gaussian'."
+        )
+
+
+@torch.no_grad()
+def evaluate_trial_average(
+    msca,
+    X_train,
+    X_val,
+    loss_func="gaussian",
+    decoder_type="linear",
+    n_splits=5,
+    threshold=0.0001,
+    hidden_layer_sizes=(155,),
+    max_iter=500,
+    random_state=0,
+    poisson_alpha=1e-4,
+    return_predictions=False,
+):
+    """
+    Evaluate a bi-cross-validation fold when holding out neurons.
+
+    Parameters
+    ----------
+    msca : object
+        A trained instantiation of mSCA.
+
+    X_train : dict
+        Neural activity used to train mSCA.
+
+    X_val : dict
+        Held-out neural activity used for validation.
+
+    loss_func : str
+        Which observation/loss model to use.
+
+        Options:
+            "poisson"
+            "gaussian"
+
+    decoder_type : str
+        Which decoder to use.
+
+        Options:
+            "linear"
+            "nonlinear"
+
     n_splits : int
-        Number of trial-KFold splits.
-    threshold : float
-        Minimum normalized mass for a latent to count in a region.
+        Number of trial-level CV splits.
+
+    threshold : float or None
+        Threshold used to remove latents that are too small.
+        If None, no thresholding is applied.
+
+    hidden_layer_sizes : tuple
+        Hidden layer size for nonlinear decoder.
+
+    max_iter : int
+        Max iterations for MLPRegressor.
+
+    random_state : int
+        Random seed for KFold and MLPRegressor.
+
+    poisson_alpha : float
+        Regularization strength for Poisson GLM.
+
+    return_predictions : bool
+        If True, return both performances and predictions_container.
 
     Returns
     -------
-    predictions_container : dict
-        {region: [pred_array_per_trial]}  — same structure as X_val but truncated.
+    performances_all : list
+        One score per fold.
+
+        If loss_func == "poisson":
+            scores are pseudo R2.
+
+        If loss_func == "gaussian":
+            scores are variance-weighted R2.
+
+    predictions_container : dict, optional
+        Returned only if return_predictions=True.
     """
+
+    print("inside evaluate_trial_average")
+    print("loss_func:", loss_func)
+    print("decoder_type:", decoder_type)
+    print("hidden_layer_sizes:", hidden_layer_sizes)
+
+    loss_func = loss_func.lower()
+    decoder_type = decoder_type.lower()
+
+    if loss_func not in ["poisson", "gaussian"]:
+        raise ValueError("loss_func must be either 'poisson' or 'gaussian'.")
+
+    if decoder_type not in ["linear", "nonlinear"]:
+        raise ValueError("decoder_type must be either 'linear' or 'nonlinear'.")
+
+    # --------------------------------------------------
+    # 1. Compute latents on training neurons
+    # --------------------------------------------------
     Z = msca.transform(X_train)
 
-    Z_distrib = compute_region_specificity(Z)
-    Z_thresholded = compute_thresholded_latents(Z, threshold)
+    # --------------------------------------------------
+    # 2. Optional latent thresholding
+    # --------------------------------------------------
+    if threshold is not None:
+        Z_eval = compute_thresholded_latents(Z, threshold)
+    else:
+        Z_eval = Z
 
-    T = np.arange(len(Z_thresholded[list(Z_thresholded.keys())[0]]))
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+    # This is actually trial index, not time index
+    trial_indices = np.arange(len(Z_eval[list(Z_eval.keys())[0]]))
 
-    predictions_container = {
-        k: [np.zeros_like(v_i)[msca.trunc] for v_i in v] for k, v in X_val.items()
-    }
+    # Same split across models for fair comparison
+    kf = KFold(
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=random_state,
+    )
 
-    for train_index, test_index in kf.split(T):
+    # Optional old-style prediction container
+    if return_predictions:
+        predictions_container = {
+            k: [np.zeros_like(v_i)[msca.trunc] for v_i in v]
+            for k, v in X_val.items()
+        }
+
+    performances_all = []
+
+    # --------------------------------------------------
+    # 3. Trial-level cross-validation
+    # --------------------------------------------------
+    for train_index, test_index in kf.split(trial_indices):
+
+        # Latents on training trials
         Z_concat_train = {
             k: np.concatenate([v[i] for i in train_index], axis=0)
-            for k, v in Z_thresholded.items()
+            for k, v in Z_eval.items()
         }
+
+        # Latents on testing trials
         Z_concat_test = {
             k: np.concatenate([v[i] for i in test_index], axis=0)
-            for k, v in Z_thresholded.items()
+            for k, v in Z_eval.items()
         }
+
+        # Held-out neurons on training trials
         X_val_concat_train = {
-            k: np.concatenate([v[i][msca.trunc] for i in train_index], axis=0)
-            for k, v in X_val.items()
-        }
-        X_val_concat_test = {
-            k: np.concatenate([v[i][msca.trunc] for i in test_index], axis=0)
-            for k, v in X_val.items()
-        }
-
-        for k in Z_concat_train.keys():
-            Z_train = Z_concat_train[k]
-            Z_test  = Z_concat_test[k]
-            X_train_heldout_r = X_val_concat_train[k]
-
-            regression_model = _make_regressor(loss_func, regressor)
-
-            # PoissonRegressor requires y >= 0; shift if needed then un-shift predictions
-            if loss_func == "Poisson" and regressor == "linear":
-                col_min = X_train_heldout_r.min(axis=0, keepdims=True)
-                shift = np.minimum(col_min, 0.0)           # 0 if already non-negative
-                regression_model.fit(Z_train, X_train_heldout_r - shift)
-                predictions_r = regression_model.predict(Z_test) + shift
-            else:
-                regression_model.fit(Z_train, X_train_heldout_r)
-                predictions_r = regression_model.predict(Z_test)
-
-            predictions_r = np.split(
-                predictions_r,
-                np.cumsum([Z[k][i].shape[0] for i in test_index])[:-1],
+            k: np.concatenate(
+                [v[i][msca.trunc] for i in train_index],
                 axis=0,
             )
-            for i, j in enumerate(test_index):
-                predictions_container[k][j] = predictions_r[i]
+            for k, v in X_val.items()
+        }
 
-    return predictions_container
+        # Held-out neurons on testing trials
+        X_val_concat_test = {
+            k: np.concatenate(
+                [v[i][msca.trunc] for i in test_index],
+                axis=0,
+            )
+            for k, v in X_val.items()
+        }
 
+        fold_predictions = []
+        fold_targets = []
+        fold_mean_fr = []
+
+        # --------------------------------------------------
+        # 4. Fit one decoder per region
+        # --------------------------------------------------
+        for k in Z_concat_train.keys():
+
+            Z_train = Z_concat_train[k]
+            Z_test = Z_concat_test[k]
+
+            X_train_heldout_r = X_val_concat_train[k]
+            X_test_heldout_r = X_val_concat_test[k]
+
+            # Poisson models require non-negative targets
+            if loss_func == "poisson":
+                if np.any(X_train_heldout_r < 0) or np.any(X_test_heldout_r < 0):
+                    raise ValueError(
+                        "Poisson loss requires non-negative neural activity. "
+                        "If your data are z-scored or centered calcium traces, "
+                        "use loss_func='gaussian' instead."
+                    )
+
+            # Build decoder according to loss function and decoder type
+            regression_model = build_decoder(
+                loss_func=loss_func,
+                decoder_type=decoder_type,
+                hidden_layer_sizes=hidden_layer_sizes,
+                max_iter=max_iter,
+                random_state=random_state,
+                poisson_alpha=poisson_alpha,
+            )
+
+            # Fit decoder
+            regression_model.fit(Z_train, X_train_heldout_r)
+
+            # Predict held-out neurons on held-out trials
+            predictions_r = regression_model.predict(Z_test)
+
+            # Poisson predictions are rates, so they should be positive
+            if loss_func == "poisson":
+                predictions_r = np.clip(predictions_r, 1e-8, None)
+
+            fold_predictions.append(predictions_r)
+            fold_targets.append(X_test_heldout_r)
+
+            # Null model mean firing rate, computed from training trials only
+            if loss_func == "poisson":
+                mean_fr_r = np.mean(X_train_heldout_r, axis=0, keepdims=True)
+                fold_mean_fr.append(mean_fr_r)
+
+            # Optional: save predictions back into trial-wise container
+            if return_predictions:
+                split_indices = np.cumsum(
+                    [Z_eval[k][i].shape[0] for i in test_index]
+                )[:-1]
+
+                predictions_r_split = np.split(
+                    predictions_r,
+                    split_indices,
+                    axis=0,
+                )
+
+                for idx, trial_id in enumerate(test_index):
+                    predictions_container[k][trial_id] = predictions_r_split[idx]
+
+        # --------------------------------------------------
+        # 5. Concatenate across regions and compute score
+        # --------------------------------------------------
+        fold_predictions = np.concatenate(fold_predictions, axis=1)
+        fold_targets = np.concatenate(fold_targets, axis=1)
+
+        if loss_func == "poisson":
+            fold_mean_fr = np.concatenate(fold_mean_fr, axis=1)
+
+            score = compute_score(
+                loss_func=loss_func,
+                X_test_heldout=fold_targets,
+                predictions=fold_predictions,
+                mean_fr=fold_mean_fr,
+            )
+
+        elif loss_func == "gaussian":
+            score = compute_score(
+                loss_func=loss_func,
+                X_test_heldout=fold_targets,
+                predictions=fold_predictions,
+            )
+
+        performances_all.append(score)
+
+    if return_predictions:
+        return performances_all, predictions_container
+
+    return performances_all
 
 
 
