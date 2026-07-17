@@ -8,7 +8,10 @@ from scipy import io
 import matplotlib.pyplot as plt
 
 from msca import *
-
+import sys
+import h5py
+import os
+import matplotlib.pyplot as plt
 
 def bi_cross_validation_neuron_indices(X, n_splits=5):
     """
@@ -109,90 +112,110 @@ def preprocess(data_array, start_idxs, end_idxs, downsample_factor=5):
 
     return split_data
 
+def load_hdf5_to_dict(filename):
+    """
+    Recursive loader for the HDF5 files.
+    """
+
+    def recursive_load(group):
+        data = {}
+        for key, item in group.items():
+            if isinstance(item, h5py.Group):
+                data[key] = recursive_load(item)
+            else:
+                data[key] = item[()]
+        return data
+
+    with h5py.File(filename, "r") as h5file:
+        return recursive_load(h5file)
 
 
+"""
+5-fold bi-cross-validation on reaching data — nonlinear encoder + linear decoder.
+"""
+if __name__ == "__main__":
+      
+    data_dir = "./experiments/arena/data"
+    # Load preprocessed dataset
+    training_dataset = load_hdf5_to_dict(
+        os.path.join(data_dir, "arena_training_bin_size=10.h5")
+    )
 
-# """
-# 5-fold bi-cross-validation on reaching data — nonlinear encoder + linear decoder.
-# """
-# if __name__ == "__main__":
-#     # Load reaching data
-#     data = torch.load(
-#         "./experiments/reaching/data/x_target_aligned.pt", weights_only=False
-#     )
+    # Container for mSCA style input
+    X = {k: [] for k in ["cortex", "striatum"]}
 
-#     X = {
-#         "M1":  [x.astype("float32") for x in data["M1"]],
-#         "PMd": [x.astype("float32") for x in data["PMd"]],
-#     }
+    # Split off only the striatal or cortical data
+    for brain_region in X.keys():
+        for i, (k, v) in enumerate(training_dataset.items()):
+            X[brain_region] += [v_i for v_i in v[brain_region]]
 
-#     # Output directory
-#     experiment_path = "./experiments/reaching/results/bi-cross-validation/nonlinear-linear/"
-#     os.makedirs(experiment_path, exist_ok=True)
+    # Output directory
+    experiment_path = "./experiments/arena/results/bi-cross-validation/nonlinear-nonlinear/"
+    os.makedirs(experiment_path, exist_ok=True)
 
-#     # Create or load 5-fold neuron splits
-#     train_split_path = os.path.join(experiment_path, "n_train_splits.pt")
-#     test_split_path  = os.path.join(experiment_path, "n_test_splits.pt")
-#     if not os.path.exists(train_split_path):
-#         train_idxs, test_idxs = bi_cross_validation_neuron_indices(X, n_splits=5)
-#         torch.save(train_idxs, train_split_path)
-#         torch.save(test_idxs,  test_split_path)
-#     else:
-#         train_idxs = torch.load(train_split_path, weights_only=False)
-#         test_idxs  = torch.load(test_split_path,  weights_only=False)
+    # Create or load 5-fold neuron splits
+    train_split_path = os.path.join(experiment_path, "n_train_splits.pt")
+    test_split_path  = os.path.join(experiment_path, "n_test_splits.pt")
+    if not os.path.exists(train_split_path):
+        train_idxs, test_idxs = bi_cross_validation_neuron_indices(X, n_splits=5)
+        torch.save(train_idxs, train_split_path)
+        torch.save(test_idxs,  test_split_path)
+    else:
+        train_idxs = torch.load(train_split_path, weights_only=False)
+        test_idxs  = torch.load(test_split_path,  weights_only=False)
 
-#     k0 = list(train_idxs.keys())[0]
+    k0 = list(train_idxs.keys())[0]
 
-#     for i in range(len(train_idxs[k0])):
-#         print(f"\n=== fold {i} ===")
-#         # Subset to training neurons only
-#         x = {k: [v_i[:, train_idxs[k][i]] for v_i in v] for k, v in X.items()}
+    for i in range(len(train_idxs[k0])):
+        print(f"\n=== fold {i} ===")
+        # Subset to training neurons only
+        x = {k: [v_i[:, train_idxs[k][i]] for v_i in v] for k, v in X.items()}
 
-#         # nonlinear encoder + linear decoder 
-#         msca, losses,_,_ = mSCA(
-#             n_components=20,
-#             loss_func="Poisson",
-#             n_epochs=5000,
-#             post_hoc_epoch=-1,
-#             linear=False,
-#             lam_region=0.0, # lam_sparse is adaptive so we need to turn on the warmup
-#             decoder_type="linear", # linear decoder
-#             cd_rate=0.5,
-#             cd_mode="both",
-#             filter_len=41,
-#             init="unique",
-#             decoder_init_mode = "pca",
-#             sparsity_warmup_epochs=-1,
-#             balance_interval=100,
+        # # nonlinear encoder + linear decoder 
+        # msca, losses,_,_ = mSCA(
+        #     n_components=20,
+        #     loss_func="Poisson",
+        #     n_epochs=5000,
+        #     post_hoc_epoch=-1,
+        #     linear=False,
+        #     lam_region=0.0, # lam_sparse is adaptive so we need to turn on the warmup
+        #     decoder_type="linear", # linear decoder
+        #     cd_rate=0.5,
+        #     cd_mode="both",
+        #     filter_len=41,
+        #     init="unique",
+        #     decoder_init_mode = "pca",
+        #     sparsity_warmup_epochs=-1,
+        #     balance_interval=100,
         
-#         ).fit(x)
+        # ).fit(x)
 
-#         # # nonlinear encoder + nonlinear decoder
-#         # msca, losses,_,_ = mSCA(
-#         #     n_components=20,
-#         #     loss_func="Poisson",
-#         #     n_epochs=5000,
-#         #     post_hoc_epoch=-1,
-#         #     linear=False,
-#         #     lam_region=0.0, # lam_sparse is adaptive so we need to turn on the warmup
-#         #     decoder_type="nonlinear", # nonlinear decoder
-#         #     decoder_hidden_size=40,
-#         #     decoder_activation="tanh",
-#         #     cd_rate=0.5,
-#         #     cd_mode="both",
-#         #     filter_len=41,
-#         #     init="unique",
-#         #     decoder_init_mode = "pca",
-#         #     sparsity_warmup_epochs=1000,
-#         #     balance_interval=1000,
+        # nonlinear encoder + nonlinear decoder
+        msca, losses,_,_ = mSCA(
+            n_components=20,
+            loss_func="Poisson",
+            n_epochs=5000,
+            post_hoc_epoch=-1,
+            linear=False,
+            lam_region=0.0, # lam_sparse is adaptive so we need to turn on the warmup
+            decoder_type="nonlinear", # nonlinear decoder
+            decoder_hidden_size=40,
+            decoder_activation="tanh",
+            cd_rate=0.5,
+            cd_mode="both",
+            filter_len=41,
+            init="unique",
+            decoder_init_mode = "pca",
+            sparsity_warmup_epochs=1000,
+            balance_interval=1000,
         
-#         # ).fit(x)
+        ).fit(x)
 
 
 
-#         msca.save(os.path.join(experiment_path, f"msca_split_{i}.pt"))
+        msca.save(os.path.join(experiment_path, f"msca_split_{i}.pt"))
 
-#     print("\nDone")
+    print("\nDone")
 
 
 
@@ -294,99 +317,99 @@ def preprocess(data_array, start_idxs, end_idxs, downsample_factor=5):
 
 
 
-"""
-This is a script to run bi-cross-validation on the reaching data to generate a sweep over n_components values for three types of models
-lam_sparse is fixed at 2.5, and lam_region is fixed at 0.0. 
+# """
+# This is a script to run bi-cross-validation on the reaching data to generate a sweep over n_components values for three types of models
+# lam_sparse is fixed at 2.5, and lam_region is fixed at 0.0. 
 
-"""
+# """
 
-if __name__ == "__main__":
-    # Fixed experiment settings
-    n_components_list = [6,10,16,20,30,40] # n_components to sweep over for reaching data 
+# if __name__ == "__main__":
+#     # Fixed experiment settings
+#     n_components_list = [6,10,16,20,30,40] # n_components to sweep over for reaching data 
 
-    # Base output path for nonlinear runs
-    experiment_path = f"./experiments/reaching/results/sweep-n_components/nonlinear-nonlinear"
-    os.makedirs(experiment_path, exist_ok=True)
+#     # Base output path for nonlinear runs
+#     experiment_path = f"./experiments/reaching/results/sweep-n_components/nonlinear-nonlinear"
+#     os.makedirs(experiment_path, exist_ok=True)
 
-    # Load reaching data
-    data = torch.load(
-        "./experiments/reaching/data/x_target_aligned.pt", weights_only=False
-    )
+#     # Load reaching data
+#     data = torch.load(
+#         "./experiments/reaching/data/x_target_aligned.pt", weights_only=False
+#     )
 
-    X = {
-        "M1":  [x.astype("float32") for x in data["M1"]],
-        "PMd": [x.astype("float32") for x in data["PMd"]],
-    }
+#     X = {
+#         "M1":  [x.astype("float32") for x in data["M1"]],
+#         "PMd": [x.astype("float32") for x in data["PMd"]],
+#     }
 
-    # Create or load 5-fold neuron splits
-    train_split_path = os.path.join(experiment_path, "n_train_splits.pt")
-    test_split_path  = os.path.join(experiment_path, "n_test_splits.pt")
-    if not os.path.exists(train_split_path):
-        train_idxs, test_idxs = bi_cross_validation_neuron_indices(X, n_splits=5)
-        torch.save(train_idxs, train_split_path)
-        torch.save(test_idxs,  test_split_path)
-    else:
-        train_idxs = torch.load(train_split_path, weights_only=False)
-        test_idxs  = torch.load(test_split_path,  weights_only=False)
+#     # Create or load 5-fold neuron splits
+#     train_split_path = os.path.join(experiment_path, "n_train_splits.pt")
+#     test_split_path  = os.path.join(experiment_path, "n_test_splits.pt")
+#     if not os.path.exists(train_split_path):
+#         train_idxs, test_idxs = bi_cross_validation_neuron_indices(X, n_splits=5)
+#         torch.save(train_idxs, train_split_path)
+#         torch.save(test_idxs,  test_split_path)
+#     else:
+#         train_idxs = torch.load(train_split_path, weights_only=False)
+#         test_idxs  = torch.load(test_split_path,  weights_only=False)
 
-    k0 = list(train_idxs.keys())[0]
+#     k0 = list(train_idxs.keys())[0]
 
 
-    for n_components in n_components_list:
-        model_dir = os.path.join(experiment_path, f"n_components_{n_components}")
-        os.makedirs(model_dir, exist_ok=True)
+#     for n_components in n_components_list:
+#         model_dir = os.path.join(experiment_path, f"n_components_{n_components}")
+#         os.makedirs(model_dir, exist_ok=True)
 
-        for i in range(len(train_idxs[k0])):
-            # Grab the neural data using the current training indices
-            x = {k: [v_i[:, train_idxs[k][i]] for v_i in v] for k, v in X.items()}
+#         for i in range(len(train_idxs[k0])):
+#             # Grab the neural data using the current training indices
+#             x = {k: [v_i[:, train_idxs[k][i]] for v_i in v] for k, v in X.items()}
 
-            # nonlinear encoder + nonlinear decoder
-            msca, losses,_,_ = mSCA(
-                n_components=n_components,
-                loss_func="Poisson",
-                n_epochs=5000,
-                post_hoc_epoch=-1,
-                linear=False,
-                lam_region=0.0, # lam_sparse is adaptive so we need to turn on the warmup
-                decoder_type="nonlinear", # nonlinear decoder
-                decoder_hidden_size=40,
-                decoder_activation="tanh",
-                cd_rate=0.5,
-                cd_mode="both",
-                filter_len=41,
-                init="unique",
-                decoder_init_mode = "pca",
-                sparsity_warmup_epochs=1000,
-                balance_interval=1000,
+#             # nonlinear encoder + nonlinear decoder
+#             msca, losses,_,_ = mSCA(
+#                 n_components=n_components,
+#                 loss_func="Poisson",
+#                 n_epochs=5000,
+#                 post_hoc_epoch=-1,
+#                 linear=False,
+#                 lam_region=0.0, # lam_sparse is adaptive so we need to turn on the warmup
+#                 decoder_type="nonlinear", # nonlinear decoder
+#                 decoder_hidden_size=40,
+#                 decoder_activation="tanh",
+#                 cd_rate=0.5,
+#                 cd_mode="both",
+#                 filter_len=41,
+#                 init="unique",
+#                 decoder_init_mode = "pca",
+#                 sparsity_warmup_epochs=1000,
+#                 balance_interval=1000,
             
-            ).fit(x)
+#             ).fit(x)
 
 
 
-            # # nonlinear encoder + linear decoder 
-            # msca, losses,_,_ = mSCA(
-            #     n_components=n_components,
-            #     loss_func="Poisson",
-            #     n_epochs=5000,
-            #     post_hoc_epoch=-1,
-            #     linear=False,
-            #     lam_region=0.0, # lam_sparse is adaptive so we need to turn on the warmup
-            #     decoder_type="linear", # linear decoder
-            #     cd_rate=0.5,
-            #     cd_mode="both",
-            #     filter_len=41,
-            #     init="unique",
-            #     decoder_init_mode = "pca",
-            #     sparsity_warmup_epochs=-1,
-            #     balance_interval=100,
+#             # # nonlinear encoder + linear decoder 
+#             # msca, losses,_,_ = mSCA(
+#             #     n_components=n_components,
+#             #     loss_func="Poisson",
+#             #     n_epochs=5000,
+#             #     post_hoc_epoch=-1,
+#             #     linear=False,
+#             #     lam_region=0.0, # lam_sparse is adaptive so we need to turn on the warmup
+#             #     decoder_type="linear", # linear decoder
+#             #     cd_rate=0.5,
+#             #     cd_mode="both",
+#             #     filter_len=41,
+#             #     init="unique",
+#             #     decoder_init_mode = "pca",
+#             #     sparsity_warmup_epochs=-1,
+#             #     balance_interval=100,
             
-            # ).fit(x)
+#             # ).fit(x)
 
-            # Save model and training losses for this split
-            msca.save(os.path.join(model_dir, f"msca_split_{i}.pt"))
-            torch.save(losses, os.path.join(model_dir, f"losses_split_{i}.pt"))
+#             # Save model and training losses for this split
+#             msca.save(os.path.join(model_dir, f"msca_split_{i}.pt"))
+#             torch.save(losses, os.path.join(model_dir, f"losses_split_{i}.pt"))
 
-    print("Done.")
+#     print("Done.")
 
 
 

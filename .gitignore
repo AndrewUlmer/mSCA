@@ -139,4 +139,4 @@ experiments/cycling/test.py
 experiments/cycling/data/*
 
 experiments/simulation
-test.py
+test.pyexperiments/arena/data/*.h5
