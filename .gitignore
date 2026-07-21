@@ -140,3 +140,5 @@ experiments/cycling/data/*
 
 experiments/simulation
 test.pyexperiments/arena/data/*.h5
+experiments/arena/data/arena_full_bin_size=10.h5
+experiments/arena/data/arena_training_bin_size=10.h5

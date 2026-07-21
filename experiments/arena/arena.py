@@ -32,25 +32,30 @@ def load_hdf5_to_dict(filename):
     
 
 
-    
+
 data_dir = "./experiments/arena/data"
 # Load preprocessed dataset
 training_dataset = load_hdf5_to_dict(
-    os.path.join(data_dir, "arena_training_bin_size=10.h5")
+    os.path.join(data_dir, "arena_full_bin_size=10.h5")
 )
 
 # Container for mSCA style input
 X = {k: [] for k in ["cortex", "striatum"]}
 
 # Split off only the striatal or cortical data
+# arena_full has variable-length bouts stored as sub-groups (dict after loading)
 for brain_region in X.keys():
-    for i, (k, v) in enumerate(training_dataset.items()):
-        X[brain_region] += [v_i for v_i in v[brain_region]]
+    for k, v in training_dataset.items():
+        bouts = v[brain_region]
+        if isinstance(bouts, dict):
+            X[brain_region] += [b.astype("float32") for b in bouts.values()]
+        else:
+            X[brain_region] += [b.astype("float32") for b in bouts]
 
-results_dir = "./experiments/arena/results"
+results_dir = "./experiments/arena/results/full_dataset"
 os.makedirs(results_dir, exist_ok=True)
 model_path = os.path.join(results_dir, "msca_nonlinearDecoder.pt") # 2000
-loss_path = os.path.join(results_dir, "losses_nonlinearDecode.npz")
+loss_path = os.path.join(results_dir, "losses_nonlinearDecoder.npz")
 
 
 # Train mSCA: nolinear encoder, nonlinear decoder, default hyperparameters
